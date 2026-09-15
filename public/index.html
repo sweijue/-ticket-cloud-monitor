@@ -6,18 +6,30 @@
   <meta name="theme-color" content="#f5f5f7" />
   <title>售票雲端監控</title>
   <link rel="stylesheet" href="/style.css" />
+  <style>
+    #diagnosticDialog{width:min(94vw,880px);max-height:90dvh;box-sizing:border-box;border:1px solid #ccc;border-radius:18px;padding:22px;overflow:auto}
+    #diagnosticDialog::backdrop{background:rgba(0,0,0,.5)}
+    #diagnosticDialog .diag-head{display:flex;justify-content:space-between;align-items:center;gap:12px;position:sticky;top:0;background:white;padding:6px 0}
+    #diagnosticDialog h2{margin:0;font-size:22px}
+    #diagnosticDialog pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#f5f5f7;padding:12px;border-radius:8px;font-size:13px}
+    #diagnosticDialog .statusgrid strong{overflow-wrap:anywhere}
+    .diagnostic-image{width:100%;border:1px solid #ddd;border-radius:8px}
+    #loadStatus{color:#9b2929}button:disabled{opacity:.5}
+  </style>
 </head>
 <body>
 <main class="wrap">
   <h1>🎫 售票雲端監控</h1>
   <p class="hint">貼網址即可。寬宏、KKTIX、AVEX、拓元、ibon 會依網站規則判斷；其他網站預設自動抓「售完/缺貨、庫存/剩餘、可購買狀態」。只監控與通知，不會自動購票。</p>
 
+  <p id="buildVersion" class="hint">V3.1 KKTIX 診斷版</p>
   <section class="card">
     <h2>新增監控</h2>
     <label>名稱</label>
     <input id="name" placeholder="例如：EUNHYUK 釋票" />
     <label>售票網址</label>
     <input id="url" type="url" placeholder="https://..." />
+    <p class="inline-note">KKTIX 需先通過「測試抓取」；出現 403、驗證或無法辨識票種時會暫停。</p>
     <p class="inline-note">系統會依網址自動選擇快速抓取或雲端瀏覽器模式。</p>
   </section>
 
@@ -59,9 +71,15 @@
 
   <div class="actions"><button id="save" class="good">新增監控</button><button id="cancelEdit" class="secondary" hidden>取消編輯</button></div>
 
+  <p class="hint">頻率是每次檢查完成後的等待時間；頁面載入耗時另計，不保證每秒完成一次。</p>
   <h2 class="section-title">目前監控</h2>
+  <p id="loadStatus" role="status"></p>
   <div id="monitors"></div>
 </main>
-<script src="/app.js"></script>
+<dialog id="diagnosticDialog">
+  <div class="diag-head"><h2>KKTIX 抓取診斷</h2><button id="closeDiagnostic" class="secondary">關閉</button></div>
+  <div id="diagnosticContent"></div>
+</dialog>
+<script src="/app.js?v=3.1.0-kktix-diagnostics"></script>
 </body>
 </html>
