@@ -15,7 +15,7 @@
 
 - 可建立多個監控
 - 固定秒數或隨機秒數
-- 最低 5 秒
+- 最低 1 秒
 - 可限定監控時段
 - 自動辨識網站
 - 偵測到符合條件後自動停止
@@ -31,7 +31,7 @@
    - `ADMIN_PASSWORD=你自己的密碼`
    - `TZ=Asia/Taipei`
    - `DATA_DIR=/app/data`
-   - `MIN_SECONDS=5`
+   - `MIN_SECONDS=1`
 4. 建立 Volume 並掛載到 `/app/data`，避免重新部署後設定消失。
 5. Networking 產生公開網址。
 6. 開網址，Basic Auth 帳號固定 `admin`，密碼為 `ADMIN_PASSWORD`。

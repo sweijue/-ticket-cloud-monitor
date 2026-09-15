@@ -9,7 +9,7 @@ const PORT = Number(process.env.PORT || 3000);
 const DATA_DIR = process.env.DATA_DIR || path.join(process.cwd(), 'data');
 const DATA_FILE = path.join(DATA_DIR, 'monitors.json');
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || '';
-const MIN_SECONDS = Math.max(5, Number(process.env.MIN_SECONDS || 5));
+const MIN_SECONDS = Math.max(1, Number(process.env.MIN_SECONDS || 1));
 const TZ = process.env.TZ || 'Asia/Taipei';
 
 await fs.mkdir(DATA_DIR, { recursive: true });
