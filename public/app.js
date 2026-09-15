@@ -9,7 +9,7 @@ function formData(){
     intervalMode: mode, fixedSeconds:+$('#fixedSeconds').value,
     minSeconds:+$('#minSeconds').value, maxSeconds:+$('#maxSeconds').value,
     limitedTime: $('#limitedTime').checked, startTime:$('#startTime').value, endTime:$('#endTime').value,
-    watchText: $('#watchText').value, watchCondition:$('#watchCondition').value,
+    detectionMode: $('#detectionMode').value, watchText: $('#watchText').value, watchCondition:$('#watchCondition').value,
     ntfyTopic: $('#ntfyTopic').value.trim()
   };
 }
@@ -20,13 +20,13 @@ function fillForm(m){
   document.querySelector(`input[name="intervalMode"][value="${m.intervalMode||'random'}"]`).checked=true;
   $('#fixedSeconds').value=m.fixedSeconds||15; $('#minSeconds').value=m.minSeconds||8; $('#maxSeconds').value=m.maxSeconds||15;
   $('#limitedTime').checked=!!m.limitedTime; $('#startTime').value=m.startTime||'11:55'; $('#endTime').value=m.endTime||'12:30';
-  $('#watchText').value=m.watchText||'已售完'; $('#watchCondition').value=m.watchCondition||'disappears'; $('#ntfyTopic').value=m.ntfyTopic||'';
+  $('#detectionMode').value=m.detectionMode||'auto'; $('#watchText').value=m.watchText||'已售完'; $('#watchCondition').value=m.watchCondition||'disappears'; $('#ntfyTopic').value=m.ntfyTopic||''; updateCustomRule();
   $('#save').textContent='更新監控'; $('#cancelEdit').hidden=false;
   window.scrollTo({top:0,behavior:'smooth'});
 }
 
 function resetForm(){
-  editingId=null; $('#name').value=''; $('#url').value=''; $('#save').textContent='新增監控'; $('#cancelEdit').hidden=true;
+  editingId=null; $('#name').value=''; $('#url').value=''; $('#detectionMode').value='auto'; updateCustomRule(); $('#save').textContent='新增監控'; $('#cancelEdit').hidden=true;
 }
 
 async function api(url, opts={}){
@@ -37,6 +37,13 @@ async function api(url, opts={}){
 }
 
 function siteName(t){return ({kham:'寬宏',kktix:'KKTIX',avex:'AVEX',tixcraft:'拓元',ibon:'ibon',generic:'通用'})[t]||t}
+function detectionName(m){
+  if(m.siteType!=='generic') return '網站自動判斷';
+  return ({auto:'自動判斷',soldout:'售完/缺貨解除',stock:'庫存/剩餘 > 0',custom:'自訂文字'})[m.detectionMode||'auto']||'自動判斷';
+}
+function updateCustomRule(){ $('#customRule').hidden = $('#detectionMode').value !== 'custom'; }
+$('#detectionMode').addEventListener('change', updateCustomRule);
+updateCustomRule();
 function stateName(m){
   if(m.detectedAt) return '🚨 已偵測到變化';
   if(m.state==='paused') return '⏸ 已因網站限制暫停';
@@ -54,6 +61,7 @@ function render(ms){
     <div class="statusgrid">
       <span>網址</span><strong>${escapeHtml(m.url)}</strong>
       <span>頻率</span><strong>${m.intervalMode==='fixed'?`每 ${m.fixedSeconds} 秒`:`隨機 ${m.minSeconds}～${m.maxSeconds} 秒`}</strong>
+      <span>判斷</span><strong>${detectionName(m)}</strong>
       <span>最後檢查</span><strong>${m.lastCheck||'—'}</strong>
       <span>下次檢查</span><strong class="next" data-id="${m.id}">${nextText(m)}</strong>
       <span>結果</span><strong>${escapeHtml(m.lastResult||'—')}</strong>
@@ -72,6 +80,7 @@ function render(ms){
 function escapeHtml(v){return String(v??'').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]))}
 
 let cache=[];
+monitorsEl.innerHTML='<div class="card empty">正在載入監控…</div>';
 async function load(){cache=await api('/api/monitors');render(cache)}
 
 $('#save').addEventListener('click',async()=>{

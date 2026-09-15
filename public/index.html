@@ -10,7 +10,7 @@
 <body>
 <main class="wrap">
   <h1>🎫 售票雲端監控</h1>
-  <p class="hint">貼網址即可。會自動辨識寬宏、KKTIX、AVEX、拓元、ibon；其他網站則使用通用文字模式。只監控與通知，不會自動購票。</p>
+  <p class="hint">貼網址即可。寬宏、KKTIX、AVEX、拓元、ibon 會依網站規則判斷；其他網站預設自動抓「售完/缺貨、庫存/剩餘、可購買狀態」。只監控與通知，不會自動購票。</p>
 
   <section class="card">
     <h2>新增監控</h2>
@@ -35,11 +35,20 @@
   </section>
 
   <section class="card">
-    <h2>其他網站備用規則</h2>
-    <p class="hint">寬宏、KKTIX、AVEX、拓元、ibon 會自動判斷；只有不認得的網站才使用這裡。</p>
-    <label>監控文字</label><input id="watchText" value="已售完" />
-    <label>通知條件</label>
-    <select id="watchCondition"><option value="disappears">這段文字消失</option><option value="appears">這段文字出現</option></select>
+    <h2>監控判斷</h2>
+    <label>判斷方式</label>
+    <select id="detectionMode">
+      <option value="auto" selected>自動判斷（建議）</option>
+      <option value="soldout">售完／缺貨狀態解除</option>
+      <option value="stock">庫存／剩餘數量 &gt; 0</option>
+      <option value="custom">自訂文字</option>
+    </select>
+    <p class="hint">寬宏、AVEX、KKTIX、拓元、ibon 仍優先使用各網站專用規則。其他網站選「自動判斷」時，會先找庫存/剩餘數字，再看售完/缺貨狀態與可購買按鈕。</p>
+    <div id="customRule" hidden>
+      <label>監控文字</label><input id="watchText" value="已售完" />
+      <label>通知條件</label>
+      <select id="watchCondition"><option value="disappears">這段文字消失</option><option value="appears">這段文字出現</option></select>
+    </div>
   </section>
 
   <section class="card">
