@@ -1,1 +1,58 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <meta name="theme-color" content="#f5f5f7" />
+  <title>售票雲端監控</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+<main class="wrap">
+  <h1>🎫 售票雲端監控</h1>
+  <p class="hint">貼網址即可。會自動辨識寬宏、KKTIX、AVEX、拓元、ibon；其他網站則使用通用文字模式。只監控與通知，不會自動購票。</p>
 
+  <section class="card">
+    <h2>新增監控</h2>
+    <label>名稱</label>
+    <input id="name" placeholder="例如：EUNHYUK 釋票" />
+    <label>售票網址</label>
+    <input id="url" type="url" placeholder="https://..." />
+    <p class="inline-note">系統會依網址自動選擇快速抓取或雲端瀏覽器模式。</p>
+  </section>
+
+  <section class="card">
+    <h2>檢查頻率</h2>
+    <label class="row"><input name="intervalMode" type="radio" value="fixed" /> 固定每 <input id="fixedSeconds" class="small" type="number" min="5" value="15" /> 秒</label>
+    <label class="row"><input name="intervalMode" type="radio" value="random" checked /> 隨機 <input id="minSeconds" class="small" type="number" min="5" value="8" /> ～ <input id="maxSeconds" class="small" type="number" min="5" value="15" /> 秒</label>
+    <p class="hint">最低 5 秒。網站出現 429、驗證碼、排隊或防護頁時會停止，不嘗試繞過。</p>
+  </section>
+
+  <section class="card">
+    <h2>監控時段</h2>
+    <label class="row"><input id="limitedTime" type="checkbox" /> 只在指定時段監控</label>
+    <div class="times"><input id="startTime" type="time" value="11:55" /><span>～</span><input id="endTime" type="time" value="12:30" /></div>
+  </section>
+
+  <section class="card">
+    <h2>其他網站備用規則</h2>
+    <p class="hint">寬宏、KKTIX、AVEX、拓元、ibon 會自動判斷；只有不認得的網站才使用這裡。</p>
+    <label>監控文字</label><input id="watchText" value="已售完" />
+    <label>通知條件</label>
+    <select id="watchCondition"><option value="disappears">這段文字消失</option><option value="appears">這段文字出現</option></select>
+  </section>
+
+  <section class="card">
+    <h2>iPhone 推播</h2>
+    <label>ntfy Topic</label><input id="ntfyTopic" placeholder="例如 ticket-一串難猜字串" />
+    <p class="hint">iPhone 安裝 ntfy 並訂閱相同 Topic。偵測到票況變化時，通知可直接點回售票頁。</p>
+  </section>
+
+  <div class="actions"><button id="save" class="good">新增監控</button><button id="cancelEdit" class="secondary" hidden>取消編輯</button></div>
+
+  <h2 class="section-title">目前監控</h2>
+  <div id="monitors"></div>
+</main>
+<script src="/app.js"></script>
+</body>
+</html>
