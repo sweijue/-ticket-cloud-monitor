@@ -97,8 +97,11 @@ function cleanText(s) {
 }
 
 function blockedText(text, status = 200) {
-  const t = text.toLowerCase();
-  return status === 429 || /too many requests|captcha|cloudflare|access denied|排隊|驗證碼|機器人|robot check/.test(t);
+  const t = String(text || '').toLowerCase();
+  // HTTP 200 is normal. Avoid false positives from ordinary page text such as
+  // customer-service forms that merely contain the word "驗證碼".
+  if ([403, 429, 503].includes(Number(status))) return true;
+  return /too many requests|access denied|cloudflare ray id|checking your browser|verify you are human|robot check|請完成(?:安全)?驗證|安全驗證|您正在排隊|排隊中/.test(t);
 }
 
 async function httpHtml(url) {
