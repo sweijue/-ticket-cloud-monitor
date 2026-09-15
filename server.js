@@ -159,13 +159,69 @@ function parseAvex(html) {
   return { site: 'avex', available: !sold && /加入購物車|立即購買|購買/.test(body), summary: sold ? '目前顯示售完/缺貨' : '頁面未找到明確庫存數字', fingerprint: body.slice(0, 8000) };
 }
 
+function stockFromText(text) {
+  const patterns = [
+    /(?:庫存(?:量)?|剩餘(?:數量|票數)?|餘票|可售(?:數量)?|stock|remaining)\s*[:：]?\s*(\d+)/gi,
+    /(\d+)\s*(?:張|件)\s*(?:可售|剩餘|available)/gi
+  ];
+  const found = [];
+  for (const re of patterns) {
+    let m;
+    while ((m = re.exec(text)) !== null) found.push(Number(m[1]));
+  }
+  return found.filter(Number.isFinite);
+}
+
+function genericDecision(text, controls, m) {
+  const mode = m.detectionMode || (m.watchText ? 'custom' : 'auto');
+  const soldRe = /已售完|售罄|完售|sold out|暫無票|無票|缺貨|庫存不足|補貨中/gi;
+  const soldMatches = text.match(soldRe) || [];
+  const stock = stockFromText(text);
+  const enabledBuy = (controls || []).filter(c => !c.disabled && /購買|立即購買|立即報名|下一步|選購|加入購物車|buy|register|order/i.test(`${c.text || ''} ${c.href || ''}`));
+
+  if (mode === 'stock') {
+    if (!stock.length) return { available: false, summary: '未找到明確庫存/剩餘數字', fingerprint: 'stock:none' };
+    const max = Math.max(...stock);
+    return { available: max > 0, summary: `找到庫存/剩餘數字：${stock.join('、')}`, fingerprint: `stock:${stock.join(',')}` };
+  }
+
+  if (mode === 'soldout') {
+    const sold = soldMatches.length > 0;
+    return { available: !sold, summary: sold ? `目前仍有售完/缺貨提示（${soldMatches.length} 處）` : '售完/缺貨提示已解除', fingerprint: `sold:${soldMatches.length}` };
+  }
+
+  if (mode === 'custom') {
+    const watch = cleanText(m.watchText || '已售完');
+    const has = watch ? text.includes(watch) : false;
+    const matched = m.watchCondition === 'appears' ? has : !has;
+    return { available: matched, summary: watch ? `「${watch}」目前${has ? '存在' : '不存在'}` : '未設定監控文字', fingerprint: `${watch}:${has}` };
+  }
+
+  // Auto: first trust explicit stock numbers, then sold-out state, then enabled purchase controls.
+  if (stock.length) {
+    const max = Math.max(...stock);
+    return { available: max > 0, summary: `自動判斷庫存/剩餘：${stock.join('、')}`, fingerprint: `auto-stock:${stock.join(',')}` };
+  }
+  if (soldMatches.length) {
+    return { available: false, summary: `自動判斷：目前仍顯示售完/缺貨（${soldMatches.length} 處）`, fingerprint: `auto-sold:${soldMatches.length}` };
+  }
+  if (enabledBuy.length) {
+    return { available: true, summary: `自動判斷：發現可購買控制項 ${enabledBuy.slice(0, 5).map(x => x.text || x.tag).join('、')}`, fingerprint: `auto-buy:${enabledBuy.slice(0,10).map(x=>x.text||x.href||x.tag).join('|')}` };
+  }
+  return { available: false, summary: '自動判斷：未找到明確庫存、售完或可購買狀態', fingerprint: 'auto:unknown' };
+}
+
 function parseGenericHtml(html, m) {
   const $ = cheerio.load(html);
   const text = cleanText($('body').text());
-  const watch = cleanText(m.watchText || '已售完');
-  const has = watch ? text.includes(watch) : false;
-  const matched = m.watchCondition === 'appears' ? has : !has;
-  return { site: 'generic', available: matched, summary: watch ? `「${watch}」目前${has ? '存在' : '不存在'}` : '未設定監控文字', fingerprint: `${watch}:${has}` };
+  const controls = $('button,select,input[type="button"],input[type="submit"],a').map((_, el) => ({
+    tag: el.tagName || '',
+    text: cleanText($(el).text() || $(el).attr('value') || $(el).attr('aria-label') || ''),
+    disabled: $(el).is(':disabled') || $(el).attr('aria-disabled') === 'true',
+    href: $(el).attr('href') || ''
+  })).get().slice(0, 800);
+  const d = genericDecision(text, controls, m);
+  return { site: 'generic', ...d };
 }
 
 async function browserSnapshot(url, m, type) {
@@ -233,10 +289,8 @@ async function browserSnapshot(url, m, type) {
 }
 
 function parseGenericBrowser(text, controls, m) {
-  const watch = cleanText(m.watchText || '已售完');
-  const has = watch ? text.includes(watch) : false;
-  const matched = m.watchCondition === 'appears' ? has : !has;
-  return { site: 'generic', available: matched, summary: `「${watch}」目前${has ? '存在' : '不存在'}`, fingerprint: `${watch}:${has}:${controls.length}` };
+  const d = genericDecision(text, controls, m);
+  return { site: 'generic', ...d, fingerprint: `${d.fingerprint}:${controls.length}` };
 }
 
 async function inspect(m) {
@@ -346,8 +400,11 @@ function normalizeMonitor(input, existing = {}) {
     limitedTime: !!input.limitedTime,
     startTime: input.startTime || '11:55',
     endTime: input.endTime || '12:30',
-    watchText: String(input.watchText || '已售完'),
-    watchCondition: input.watchCondition === 'appears' ? 'appears' : 'disappears',
+    detectionMode: ['auto','stock','soldout','custom'].includes(input.detectionMode)
+      ? input.detectionMode
+      : (existing.detectionMode || (existing.id && existing.watchText ? 'custom' : 'auto')),
+    watchText: String(input.watchText || existing.watchText || '已售完'),
+    watchCondition: input.watchCondition === 'appears' ? 'appears' : (input.watchCondition === 'disappears' ? 'disappears' : (existing.watchCondition || 'disappears')),
     ntfyTopic: String(input.ntfyTopic || existing.ntfyTopic || '').trim(),
     running: !!existing.running,
     checks: Number(existing.checks || 0),
