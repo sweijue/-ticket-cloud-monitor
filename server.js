@@ -65,9 +65,9 @@ function siteType(url) {
 }
 
 function secondsFor(m) {
-  if (m.intervalMode === 'fixed') return Math.max(MIN_SECONDS, Number(m.fixedSeconds || 15));
-  const min = Math.max(MIN_SECONDS, Number(m.minSeconds || 8));
-  const max = Math.max(min, Number(m.maxSeconds || 15));
+  if (m.intervalMode === 'fixed') return Math.max(MIN_SECONDS, Number(m.fixedSeconds || 5));
+  const min = Math.max(MIN_SECONDS, Number(m.minSeconds || 1));
+  const max = Math.max(min, Number(m.maxSeconds || 5));
   return Math.floor(Math.random() * (max - min + 1)) + min;
 }
 
@@ -326,8 +326,11 @@ async function notify(m, result) {
 }
 
 function publicMonitor(m) {
+  // Never expose the Node.js Timeout object stored in runtime.timer.
+  // Timeout contains circular references and makes res.json() fail with HTTP 500.
   const r = runtime.get(m.id) || {};
-  return { ...m, ...r, siteType: siteType(m.url) };
+  const { timer, ...safeRuntime } = r;
+  return { ...m, ...safeRuntime, siteType: siteType(m.url) };
 }
 
 function scheduleNext(m, delaySec) {
@@ -394,9 +397,9 @@ function normalizeMonitor(input, existing = {}) {
     name: String(input.name || existing.name || '').trim() || new URL(url).hostname,
     url,
     intervalMode: input.intervalMode === 'fixed' ? 'fixed' : 'random',
-    fixedSeconds: Math.max(MIN_SECONDS, Number(input.fixedSeconds || 15)),
-    minSeconds: Math.max(MIN_SECONDS, Number(input.minSeconds || 8)),
-    maxSeconds: Math.max(MIN_SECONDS, Number(input.maxSeconds || 15)),
+    fixedSeconds: Math.max(MIN_SECONDS, Number(input.fixedSeconds || 5)),
+    minSeconds: Math.max(MIN_SECONDS, Number(input.minSeconds || 1)),
+    maxSeconds: Math.max(MIN_SECONDS, Number(input.maxSeconds || 5)),
     limitedTime: !!input.limitedTime,
     startTime: input.startTime || '11:55',
     endTime: input.endTime || '12:30',
