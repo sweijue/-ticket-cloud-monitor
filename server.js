@@ -9,12 +9,17 @@ const PORT = Number(process.env.PORT || 3000);
 const DATA_DIR = process.env.DATA_DIR || path.join(process.cwd(), 'data');
 const DATA_FILE = path.join(DATA_DIR, 'monitors.json');
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || '';
-const MIN_SECONDS = Math.max(1, Number(process.env.MIN_SECONDS || 1));
+const MIN_SECONDS = Math.max(1, Math.min(86400, Math.ceil(Number(process.env.MIN_SECONDS) || 1)));
 const TZ = process.env.TZ || 'Asia/Taipei';
 
 await fs.mkdir(DATA_DIR, { recursive: true });
 
 const app = express();
+for (const verb of ['get', 'post', 'put', 'delete']) {
+  const register = app[verb].bind(app);
+  app[verb] = (...args) => register(...args.map(arg =>
+    typeof arg === 'function' ? (req, res, next) => Promise.resolve().then(() => arg(req, res, next)).catch(next) : arg));
+}
 app.use(express.json({ limit: '512kb' }));
 
 if (ADMIN_PASSWORD) {
@@ -30,12 +35,280 @@ if (ADMIN_PASSWORD) {
   });
 }
 
-app.use(express.static(path.join(process.cwd(), 'public')));
+app.use((req, res, next) => { res.setHeader('Cache-Control', 'no-store'); next(); });
+app.use(express.static(path.join(process.cwd(), 'public'), { etag: false, maxAge: 0 }));
 
 let browser;
 async function getBrowser() {
-  if (!browser) browser = await chromium.launch({ headless: true });
-  return browser;
+  if (browser?.isConnected()) return browser;
+  if (!browserLaunch) {
+    const options = { headless: true };
+    if (process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH) options.executablePath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH;
+    browserLaunch = chromium.launch(options).then(b => { browser = b; return b; }).finally(() => { browserLaunch = null; });
+  }
+  return browserLaunch;
+}
+
+// KKTIX diagnostics v3.1: ordinary browser state only, no anti-bot bypass.
+const BUILD_VERSION = '3.1.0-kktix-diagnostics';
+const DIAGNOSTICS_DIR = path.join(DATA_DIR, 'diagnostics');
+const SESSION_DIR = path.join(DATA_DIR, 'browser-sessions');
+await fs.mkdir(DIAGNOSTICS_DIR, { recursive: true, mode: 0o700 });
+await fs.mkdir(SESSION_DIR, { recursive: true, mode: 0o700 });
+const kktixSessions = new Map();
+const activeInspections = new Set();
+const activeRuns = new Set();
+let browserLaunch;
+let shuttingDown = false;
+
+function diagnosticKey(id) {
+  return crypto.createHash('sha256').update(String(id)).digest('hex');
+}
+function sessionFile(id) { return path.join(SESSION_DIR, `${diagnosticKey(id)}.json`); }
+function imageFile(id) { return path.join(DIAGNOSTICS_DIR, `${diagnosticKey(id)}.jpg`); }
+function safePageUrl(value) {
+  try {
+    const u = new URL(value);
+    u.username = ''; u.password = ''; u.hash = '';
+    for (const k of [...u.searchParams.keys()]) {
+      if (/token|auth|key|hash|session|password|email|code/i.test(k)) u.searchParams.set(k, '[redacted]');
+    }
+    return u.toString();
+  } catch { return ''; }
+}
+function monitorError(code, message, pause = true) {
+  const error = new Error(message);
+  error.code = code; error.pause = pause;
+  return error;
+}
+async function closeKktixSession(id) {
+  const session = kktixSessions.get(id);
+  if (!session) return;
+  kktixSessions.delete(id);
+  await session.context.close().catch(() => {});
+}
+async function acquireKktixSession(m) {
+  let session = kktixSessions.get(m.id);
+  if (session && (session.url !== m.url || session.page.isClosed())) {
+    await closeKktixSession(m.id); session = null;
+  }
+  if (session) { session.usedAt = Date.now(); return session; }
+  // Limit memory use. Evict only idle sessions, never an in-flight check.
+  const limit = Math.max(1, Number(process.env.MAX_KKTIX_SESSIONS) || 4);
+  if (kktixSessions.size >= limit) {
+    const idle = [...kktixSessions.entries()]
+      .filter(([id]) => !activeInspections.has(id))
+      .sort((a, b) => a[1].usedAt - b[1].usedAt)[0];
+    if (!idle) throw monitorError('browser_busy', '瀏覽器正在忙碌，稍後再試。', false);
+    await closeKktixSession(idle[0]);
+  }
+  const b = await getBrowser();
+  const options = { locale: 'zh-TW', viewport: { width: 1180, height: 860 } };
+  // Use Chromium's genuine default User-Agent, not an iPhone Safari identity.
+  try {
+    const saved = JSON.parse(await fs.readFile(sessionFile(m.id), 'utf8'));
+    if (saved.url === m.url && Date.now() - saved.savedAt < 24 * 60 * 60 * 1000) options.storageState = saved.state;
+  } catch {}
+  const context = await b.newContext(options);
+  context.setDefaultTimeout(5000);
+  const page = await context.newPage();
+  page.on('dialog', d => d.dismiss().catch(() => {}));
+  session = { context, page, url: m.url, usedAt: Date.now(), visits: 0, savedAt: 0, failures: [] };
+  page.on('response', response => {
+    try {
+      const request = response.request();
+      const u = new URL(response.url());
+      const sameSite = /(^|\.)kktix\.(com|cc)$/.test(u.hostname) || u.hostname === new URL(m.url).hostname;
+      if (sameSite && ['xhr', 'fetch'].includes(request.resourceType()) && response.status() >= 400) {
+        session.failures.push({ status: response.status(), url: `${u.origin}${u.pathname}` });
+        session.failures = session.failures.slice(-8);
+      }
+    } catch {}
+  });
+  kktixSessions.set(m.id, session);
+  return session;
+}
+async function saveKktixSession(m, session) {
+  if (Date.now() - session.savedAt < 60000) return;
+  const state = await session.context.storageState();
+  const target = sessionFile(m.id), tmp = `${target}.tmp`;
+  await fs.writeFile(tmp, JSON.stringify({ url: m.url, savedAt: Date.now(), state }), { mode: 0o600 });
+  await fs.rename(tmp, target);
+  session.savedAt = Date.now();
+}
+
+// This function runs inside the page. Keep it self-contained and read-only.
+function collectKktixDom() {
+  const norm = value => String(value || '').replace(/\s+/g, ' ').trim();
+  const visible = el => {
+    if (!el || el.closest('[hidden],[aria-hidden="true"]')) return false;
+    const style = getComputedStyle(el), rect = el.getBoundingClientRect();
+    return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+  };
+  const enabled = el => visible(el) && !el.disabled &&
+    !el.matches(':disabled') && !el.closest('[aria-disabled="true"],fieldset[disabled],.disabled');
+  const sold = /已售完|售完|售罄|完售|sold\s*out|無剩餘票/i;
+  const future = /尚未開賣|尚未開始|未開賣|not\s+(?:yet\s+)?on\s+sale/i;
+  const ended = /已結束|停止販售|販售結束|sales?\s+ended/i;
+  const candidates = [...document.querySelectorAll('.ticket-unit,.ticket-row,tr[data-ticket-id],[data-ticket-id],[ng-repeat*="ticket"],.display-table-row')]
+    .filter(el => visible(el) && !el.closest('header,footer,nav'));
+  // Use the smallest ticket container. Do not inspect a whole event table as one ticket.
+  const meaningful = candidates.filter(el => {
+    const text = norm(el.innerText);
+    return !!el.querySelector('.ticket-name,.ticket-price,[data-ticket-name]') ||
+      (/ticket/i.test(el.className || '') && /(?:NT\$|TWD|NTD|\$|免費)/i.test(text)) ||
+      (el.hasAttribute('data-ticket-id') && !!el.querySelector('input,select'));
+  });
+  const roots = meaningful.filter(el => !meaningful.some(child => child !== el && el.contains(child)));
+  const rows = roots.slice(0, 100).map(el => {
+    const text = norm(el.innerText);
+    const name = norm(el.querySelector('.ticket-name,[data-ticket-name],.ticket-title')?.innerText) || text.slice(0, 100);
+    const price = norm(el.querySelector('.ticket-price')?.innerText);
+    const selects = [...el.querySelectorAll('select')].filter(visible);
+    const inputs = [...el.querySelectorAll('input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"])')]
+      .filter(x => visible(x) && (x.type === 'number' || /quantity|qty|count|ticket/i.test(`${x.name} ${x.id} ${x.className} ${x.getAttribute('ng-model') || ''}`) || x.closest('.ticket-quantity')));
+    const plus = [...el.querySelectorAll('button')].filter(x =>
+      enabled(x) && (/^\s*\+\s*$/.test(x.innerText) || /(^|\s)plus(\s|$)/.test(x.className) ||
+      !!x.querySelector('.fa-plus,.glyphicon-plus') || /增加數量|increase\s+quantity/i.test(x.getAttribute('aria-label') || '')));
+    const hasPrice = (!!price && /\d|免費|free/i.test(price)) || /(?:NT\$|TWD|NTD|\$)\s*[\d,]+|免費/i.test(text);
+    const positiveSelect = selects.some(x => enabled(x) && [...x.options].some(o =>
+      !o.disabled && !o.parentElement?.disabled && /^(?:[1-9]\d*)(?:\.0+)?$/.test(o.value.trim())));
+    const positiveInput = inputs.some(x => {
+      if (!enabled(x) || (x.readOnly && plus.length === 0)) return false;
+      const max = x.getAttribute('max'), min = Number(x.getAttribute('min') || 0);
+      if (max !== null && (Number(max) <= 0 || Number(max) < Math.max(1, min))) return false;
+      return (max !== null && Number.isFinite(Number(max)) && Number(max) >= Math.max(1, min)) || plus.length > 0;
+    });
+    const isSold = sold.test(text), isFuture = future.test(text), isEnded = ended.test(text);
+    const available = hasPrice && !isSold && !isFuture && !isEnded && (positiveSelect || positiveInput);
+    return { name: name.slice(0, 140), price: price.slice(0, 80), text: text.slice(0, 500),
+      state: available ? 'available' : isSold ? 'sold_out' : isFuture ? 'not_started' : isEnded ? 'ended' : 'unknown',
+      evidence: available ? (positiveSelect ? 'enabled_quantity_select' : 'enabled_quantity_input') : '',
+      quantityControls: selects.length + inputs.length, hasPrice };
+  }).filter(row => row.hasPrice);
+  const text = norm(document.body?.innerText).slice(0, 120000);
+  const title = norm(document.title);
+  const loginForm = [...document.querySelectorAll('input[type="password"]')].some(visible);
+  const challenge = /just a moment|attention required|access denied|security verification/i.test(title) ||
+    [...document.querySelectorAll('#challenge-running,#challenge-stage,.cf-error-details')].some(visible) ||
+    (!rows.length && /checking your browser|verify you are human|cloudflare ray id|請完成安全驗證/i.test(text));
+  const queue = !rows.length && /您正在排隊|排隊中|you are (?:now )?in (?:the )?(?:queue|line)|waiting room/i.test(text);
+  return { text, title, rows, loginForm, challenge, queue };
+}
+
+function decideKktix(snapshot, status, finalUrl, requestFailures = []) {
+  if (status === null) throw monitorError('no_response', '未取得主頁面的 HTTP 回應，無法確認票況。', false);
+  if (status === 429) throw monitorError('rate_limited', 'HTTP 429：網站要求降低請求頻率，已暫停。');
+  if (status === 403) throw monitorError('access_denied', 'HTTP 403：這次請求被拒絕；單靠代碼無法確定是 IP、登入或其他原因。');
+  if (status === 401) throw monitorError('login_required', 'HTTP 401：需要登入或授權。');
+  if (status >= 500) throw monitorError('server_error', `HTTP ${status}：網站伺服器錯誤，不代表售完。`, false);
+  if (status >= 400) throw monitorError('http_error', `HTTP ${status}：無法正常讀取此頁。`);
+  if (snapshot.challenge) throw monitorError('verification_required', '目前是驗證／防護頁，不是票況頁，已暫停。');
+  if (snapshot.queue) throw monitorError('queue', '目前是排隊頁，已暫停。');
+  if (/\/(?:users\/sign_in|login|sign_in)(?:[/?#]|$)/i.test(finalUrl) || (snapshot.loginForm && !snapshot.rows.length)) {
+    throw monitorError('login_required', '目前是登入頁，無法確認票況。');
+  }
+  if (!/\/events\/[^/]+\/registrations\/new(?:[/?#]|$)/.test(finalUrl)) {
+    throw monitorError('wrong_page', '目前不是 KKTIX 票種選擇頁；活動介紹頁的「下一步」不代表有票。');
+  }
+  const rows = snapshot.rows || [];
+  const available = rows.filter(x => x.state === 'available');
+  if (available.length) return { site: 'kktix', available: true, known: true,
+    summary: '發現可選數量的票種：' + available.map(x => `${x.name} ${x.price}`).join('\n'),
+    fingerprint: JSON.stringify(rows.map(({ name, price, state }) => ({ name, price, state }))) };
+  if (rows.length && rows.every(x => ['sold_out','not_started','ended'].includes(x.state))) {
+    return { site: 'kktix', available: false, known: true,
+      summary: rows.map(x => `${x.name}：${({ sold_out:'已售完',not_started:'尚未開賣',ended:'已結束' })[x.state]}`).join('\n'),
+      fingerprint: JSON.stringify(rows.map(({ name, state }) => ({ name, state }))) };
+  }
+  const failed = requestFailures.find(x => [401,403,429].includes(x.status));
+  if (failed) throw monitorError('ticket_data_denied', `票種尚未完整讀取，且頁面資料請求回應 HTTP ${failed.status}；請查看診斷。`);
+  throw monitorError('unknown_ticket_state', rows.length
+    ? '已看到票種，但無法確認可選數量或售完狀態，已暫停。'
+    : '沒有讀到可辨識的票種列，不會當成售完；請查看抓取畫面。');
+}
+
+async function recordKktixDiagnostic(m, page, info, snapshot, capture) {
+  const old = m.diagnostic || {};
+  const diagnostic = {
+    version: BUILD_VERSION, checkedAt: new Date().toISOString(),
+    requestedUrl: safePageUrl(m.url), finalUrl: safePageUrl(page?.url() || m.url),
+    httpStatus: info.httpStatus ?? null, code: info.code, message: info.message,
+    title: (snapshot?.title || '').slice(0, 300),
+    textPreview: (snapshot?.text || '').slice(0, 2500),
+    ticketRows: (snapshot?.rows || []).slice(0, 30),
+    requestFailures: info.failures || [], sessionReused: !!info.sessionReused,
+    sessionNote: info.sessionNote || '',
+    screenshotAt: old.screenshotAt || '', imageAvailable: !!old.imageAvailable,
+    screenshotError: '',
+  };
+  if (capture && page && !page.isClosed()) {
+    try {
+      await page.screenshot({ path: imageFile(m.id), type: 'jpeg', quality: 72,
+        fullPage: false, timeout: 5000,
+        mask: [page.locator('input[type="password"],input[type="email"]')] });
+      diagnostic.screenshotAt = new Date().toISOString(); diagnostic.imageAvailable = true;
+      await fs.chmod(imageFile(m.id), 0o600).catch(() => {});
+    } catch (error) {
+      diagnostic.imageAvailable = false; diagnostic.screenshotAt = '';
+      diagnostic.screenshotError = String(error.message).slice(0, 300);
+    }
+  }
+  m.diagnostic = diagnostic;
+  return diagnostic;
+}
+
+async function kktixSnapshot(m, { diagnostic = false } = {}) {
+  let session, snapshot = null, status = null, response;
+  const info = { httpStatus: null, failures: [], sessionReused: false };
+  try {
+    session = await acquireKktixSession(m);
+    const { page } = session;
+    info.sessionReused = session.visits > 0;
+    session.failures = [];
+    response = session.visits > 0 && page.url() === m.url
+      ? await page.reload({ waitUntil: 'domcontentloaded', timeout: 25000 })
+      : await page.goto(m.url, { waitUntil: 'domcontentloaded', timeout: 25000 });
+    session.visits += 1;
+    status = response?.status() ?? null; info.httpStatus = status;
+    if (status === 429) {
+      const retry = response?.headers()['retry-after'];
+      const ms = /^\d+$/.test(retry || '') ? Number(retry) * 1000 : Date.parse(retry || '') - Date.now();
+      m.retryAfterAt = Date.now() + (Number.isFinite(ms) && ms > 0 ? ms : 60000);
+    }
+    snapshot = await page.evaluate(collectKktixDom);
+    // Wait for rendered ticket rows, not an arbitrary fixed sleep. This loop only
+    // reads the DOM and does not create additional network requests.
+    if (status !== null && status < 400 && !snapshot.challenge && !snapshot.queue && !snapshot.loginForm) {
+      const deadline = Date.now() + 8000;
+      while (!snapshot.rows.some(x => x.state !== 'unknown') && Date.now() < deadline) {
+        await page.waitForTimeout(350);
+        snapshot = await page.evaluate(collectKktixDom);
+        if (snapshot.challenge || snapshot.queue || snapshot.loginForm || session.failures.some(x => [401,403,429].includes(x.status))) break;
+      }
+    }
+    info.failures = session.failures.slice();
+    const result = decideKktix(snapshot, status, page.url(), info.failures);
+    info.code = result.available ? 'available' : 'unavailable'; info.message = result.summary;
+    await saveKktixSession(m, session).catch(e => { info.sessionNote = `工作階段寫入失敗：${e.message}`; });
+    const capture = diagnostic || result.available || !m.diagnostic || Date.now() - Date.parse(m.diagnostic.screenshotAt || 0) > 60000;
+    await recordKktixDiagnostic(m, page, info, snapshot, capture);
+    m.lastDiagnosisCode = info.code;
+    return result;
+  } catch (error) {
+    info.code = error.code || (/timeout/i.test(error.message) ? 'load_timeout' : 'browser_error');
+    info.message = error.message; info.httpStatus = status;
+    info.failures = session?.failures || [];
+    if (info.failures.some(x => x.status === 429)) m.retryAfterAt = Math.max(m.retryAfterAt || 0, Date.now() + 60000);
+    if (session?.page && !session.page.isClosed()) {
+      snapshot = snapshot || await session.page.evaluate(collectKktixDom).catch(() => null);
+    }
+    await recordKktixDiagnostic(m, session?.page, info, snapshot, true).catch(() => {});
+    m.lastDiagnosisCode = info.code;
+    error.diagnosticCode = info.code;
+    if (error.pause) await closeKktixSession(m.id);
+    throw error;
+  }
 }
 
 let store = { monitors: [] };
@@ -46,17 +319,24 @@ try {
 
 const runtime = new Map();
 
-async function saveStore() {
-  const tmp = `${DATA_FILE}.tmp`;
-  await fs.writeFile(tmp, JSON.stringify(store, null, 2));
-  await fs.rename(tmp, DATA_FILE);
+let saveQueue = Promise.resolve();
+function saveStore() {
+  // Multiple monitors must not rename the same temporary file concurrently.
+  const serialized = JSON.stringify(store, null, 2);
+  const task = saveQueue.catch(() => {}).then(async () => {
+    const tmp = `${DATA_FILE}.tmp`;
+    await fs.writeFile(tmp, serialized, { mode: 0o600 });
+    await fs.rename(tmp, DATA_FILE);
+  });
+  saveQueue = task;
+  return task;
 }
 
 function siteType(url) {
   try {
     const host = new URL(url).hostname.toLowerCase();
     if (host.includes('kham.com.tw')) return 'kham';
-    if (host.includes('kktix.com')) return 'kktix';
+    if (host === 'kktix.com' || host.endsWith('.kktix.com') || host === 'kktix.cc' || host.endsWith('.kktix.cc')) return 'kktix';
     if (host.includes('shopping.avex.com.tw')) return 'avex';
     if (host.includes('tixcraft.com')) return 'tixcraft';
     if (host.includes('ibon.com.tw') || host.includes('ticket.ibon.com.tw')) return 'ibon';
@@ -64,10 +344,14 @@ function siteType(url) {
   } catch { return 'generic'; }
 }
 
+function validSeconds(value, fallback) {
+  const n = Number(value);
+  return Math.max(MIN_SECONDS, Math.min(86400, Number.isFinite(n) && n > 0 ? Math.ceil(n) : fallback));
+}
 function secondsFor(m) {
-  if (m.intervalMode === 'fixed') return Math.max(MIN_SECONDS, Number(m.fixedSeconds || 5));
-  const min = Math.max(MIN_SECONDS, Number(m.minSeconds || 1));
-  const max = Math.max(min, Number(m.maxSeconds || 5));
+  if (m.intervalMode === 'fixed') return validSeconds(m.fixedSeconds, 5);
+  const min = validSeconds(m.minSeconds, 1);
+  const max = Math.max(min, validSeconds(m.maxSeconds, 5));
   return Math.floor(Math.random() * (max - min + 1)) + min;
 }
 
@@ -267,10 +551,7 @@ async function browserSnapshot(url, m, type) {
 
     let available = false;
     let summary = '';
-    if (type === 'kktix') {
-      available = enabled.length > 0 && !/尚未開賣|活動尚未開始/.test(text);
-      summary = available ? `發現可操作票券/報名控制項：${enabled.slice(0, 5).map(x => x.text || x.tag).join('、')}` : `目前未發現可購買票券（售完提示 ${soldCount} 處）`;
-    } else if (type === 'tixcraft' || type === 'ibon') {
+    if (type === 'tixcraft' || type === 'ibon') {
       available = enabled.length > 0 && !/尚未開賣|停止售票|已結束/.test(text);
       summary = available ? `發現可購買控制項：${enabled.slice(0, 5).map(x => x.text || x.tag).join('、')}` : `目前未發現可購買控制項（售完提示 ${soldCount} 處）`;
     } else {
@@ -293,17 +574,26 @@ function parseGenericBrowser(text, controls, m) {
   return { site: 'generic', ...d, fingerprint: `${d.fingerprint}:${controls.length}` };
 }
 
-async function inspect(m) {
+async function inspectUnchecked(m, options = {}) {
   const type = siteType(m.url);
   if (type === 'kham') return parseKham(await httpHtml(m.url));
   if (type === 'avex') return parseAvex(await httpHtml(m.url));
-  if (['kktix', 'tixcraft', 'ibon'].includes(type)) return browserSnapshot(m.url, m, type);
+  if (type === 'kktix') return kktixSnapshot(m, options);
+  if (['tixcraft', 'ibon'].includes(type)) return browserSnapshot(m.url, m, type);
   try {
     return parseGenericHtml(await httpHtml(m.url), m);
   } catch (e) {
     if (e.pause) throw e;
     return browserSnapshot(m.url, m, 'generic');
   }
+}
+
+async function inspect(m, options = {}) {
+  if (activeInspections.has(m.id)) throw monitorError('check_busy', '這筆監控正在檢查，請稍後再試。', false);
+  if (m.retryAfterAt > Date.now()) throw monitorError('retry_after', '網站要求等待，請稍後再試。');
+  activeInspections.add(m.id);
+  try { return await inspectUnchecked(m, options); }
+  finally { activeInspections.delete(m.id); }
 }
 
 async function notify(m, result) {
@@ -326,80 +616,97 @@ async function notify(m, result) {
 }
 
 function publicMonitor(m) {
-  // Never expose the Node.js Timeout object stored in runtime.timer.
-  // Timeout contains circular references and makes res.json() fail with HTTP 500.
   const r = runtime.get(m.id) || {};
-  const { timer, ...safeRuntime } = r;
-  return { ...m, ...safeRuntime, siteType: siteType(m.url) };
+  return { ...m, state: r.state || (m.pauseReason ? 'paused' : m.running ? 'running' : 'stopped'),
+    nextAt: r.nextAt || null, lastError: r.lastError ?? m.lastError ?? '', siteType: siteType(m.url) };
 }
 
 function scheduleNext(m, delaySec) {
+  if (shuttingDown || !m.running || !store.monitors.includes(m)) return;
   clearTimeout(runtime.get(m.id)?.timer);
   const nextAt = Date.now() + delaySec * 1000;
-  const timer = setTimeout(() => runMonitor(m.id), delaySec * 1000);
+  const timer = setTimeout(() => dispatchMonitor(m.id), delaySec * 1000);
   runtime.set(m.id, { ...runtime.get(m.id), timer, nextAt });
+}
+
+function dispatchMonitor(id) {
+  runMonitor(id).catch(async error => {
+    console.error('[Monitor] background task failed:', error.message);
+    const m = store.monitors.find(x => x.id === id);
+    if (!m) return;
+    m.running = false; m.pauseReason = 'internal_error';
+    m.lastError = `監控程式錯誤：${error.message}`;
+    clearTimeout(runtime.get(id)?.timer);
+    runtime.set(id, { state: 'paused', lastError: m.lastError, nextAt: null });
+    await saveStore().catch(e => console.error('[Monitor] cannot save:', e.message));
+  });
 }
 
 async function runMonitor(id) {
   const m = store.monitors.find(x => x.id === id);
-  if (!m || !m.running) return;
-
+  if (!m || !m.running || shuttingDown || activeRuns.has(id)) return;
+  clearTimeout(runtime.get(id)?.timer);
+  if (activeInspections.has(id)) return scheduleNext(m, 1);
   if (!inSchedule(m)) {
-    runtime.set(id, { ...runtime.get(id), state: 'waiting', lastError: '', nextAt: Date.now() + 30000 });
+    runtime.set(id, { ...runtime.get(id), state: 'waiting', lastError: '' });
     return scheduleNext(m, 30);
   }
-
-  runtime.set(id, { ...runtime.get(id), state: 'checking', lastError: '' });
+  activeRuns.add(id);
+  runtime.set(id, { ...runtime.get(id), state: 'checking', lastError: '', nextAt: null });
   try {
     const result = await inspect(m);
+    // An in-flight response must not restart a stopped/deleted/edited monitor.
+    if (!m.running || !store.monitors.includes(m) || shuttingDown) return;
     const t = nowParts();
     m.checks = Number(m.checks || 0) + 1;
-    m.lastCheck = `${t.date} ${t.time}`;
-    m.lastResult = result.summary;
-    m.lastFingerprint = result.fingerprint;
-    m.detected = !!result.available;
-
+    m.lastCheck = `${t.date} ${t.time}`; m.lastResult = result.summary;
+    m.lastFingerprint = result.fingerprint; m.detected = !!result.available;
+    m.lastError = ''; m.pauseReason = ''; m.retryAfterAt = 0;
     if (result.available) {
-      m.running = false;
-      m.detectedAt = m.lastCheck;
+      m.running = false; m.detectedAt = m.lastCheck;
+      runtime.set(id, { ...runtime.get(id), state: 'detected', nextAt: null, lastError: '' });
       await saveStore();
-      runtime.set(id, { ...runtime.get(id), state: 'detected', nextAt: null });
-      await notify(m, result).catch(err => {
-        runtime.set(id, { ...runtime.get(id), lastError: `通知失敗：${err.message}` });
+      await closeKktixSession(id);
+      await notify(m, result).catch(error => {
+        m.lastError = `通知失敗：${error.message}`;
+        runtime.set(id, { ...runtime.get(id), lastError: m.lastError });
       });
-      return;
-    }
-
-    await saveStore();
-    runtime.set(id, { ...runtime.get(id), state: 'running' });
-    scheduleNext(m, secondsFor(m));
-  } catch (e) {
-    m.lastCheck = `${nowParts().date} ${nowParts().time}`;
-    m.lastError = e.message;
-    if (e.pause) {
-      m.running = false;
       await saveStore();
-      runtime.set(id, { ...runtime.get(id), state: 'paused', lastError: e.message, nextAt: null });
       return;
     }
     await saveStore();
-    runtime.set(id, { ...runtime.get(id), state: 'error', lastError: e.message });
-    scheduleNext(m, Math.max(30, secondsFor(m)));
+    runtime.set(id, { ...runtime.get(id), state: 'running', lastError: '' });
+    scheduleNext(m, secondsFor(m));
+  } catch (error) {
+    if (!m.running || !store.monitors.includes(m) || shuttingDown) return;
+    const t = nowParts(); m.lastCheck = `${t.date} ${t.time}`; m.lastError = error.message;
+    if (siteType(m.url) === 'kktix') m.lastResult = '本次無法判斷票況（不代表售完）';
+    if (error.pause) {
+      m.running = false; m.pauseReason = error.diagnosticCode || error.code || 'restricted';
+      runtime.set(id, { ...runtime.get(id), state: 'paused', lastError: error.message, nextAt: null });
+      await saveStore(); await closeKktixSession(id); return;
+    }
+    runtime.set(id, { ...runtime.get(id), state: 'error', lastError: error.message });
+    await saveStore(); scheduleNext(m, Math.max(30, secondsFor(m)));
+  } finally {
+    activeRuns.delete(id);
+    if (!m.running || !store.monitors.includes(m) || shuttingDown) await closeKktixSession(id);
   }
 }
 
 function normalizeMonitor(input, existing = {}) {
   const url = String(input.url || existing.url || '').trim();
-  new URL(url);
+  const parsedUrl = new URL(url);
+  if (!['http:', 'https:'].includes(parsedUrl.protocol) || parsedUrl.username || parsedUrl.password) throw new Error('Please use an HTTP(S) URL without credentials.');
   return {
     ...existing,
     id: existing.id || crypto.randomUUID(),
     name: String(input.name || existing.name || '').trim() || new URL(url).hostname,
     url,
     intervalMode: input.intervalMode === 'fixed' ? 'fixed' : 'random',
-    fixedSeconds: Math.max(MIN_SECONDS, Number(input.fixedSeconds || 5)),
-    minSeconds: Math.max(MIN_SECONDS, Number(input.minSeconds || 1)),
-    maxSeconds: Math.max(MIN_SECONDS, Number(input.maxSeconds || 5)),
+    fixedSeconds: validSeconds(input.fixedSeconds, 5),
+    minSeconds: validSeconds(input.minSeconds, 1),
+    maxSeconds: Math.max(validSeconds(input.minSeconds, 1), validSeconds(input.maxSeconds, 5)),
     limitedTime: !!input.limitedTime,
     startTime: input.startTime || '11:55',
     endTime: input.endTime || '12:30',
@@ -434,8 +741,18 @@ app.put('/api/monitors/:id', async (req, res) => {
     const idx = store.monitors.findIndex(x => x.id === req.params.id);
     if (idx < 0) return res.status(404).json({ error: 'not found' });
     const old = store.monitors[idx];
+    if (activeInspections.has(old.id) || activeRuns.has(old.id)) return res.status(409).json({ error: '請先停止監控並等待檢查結束，再儲存編輯。' });
     const m = normalizeMonitor(req.body, old);
-    m.running = old.running;
+    old.running = false;
+    m.running = false; m.pauseReason = ''; m.lastError = ''; m.detectedAt = '';
+    clearTimeout(runtime.get(old.id)?.timer);
+    runtime.set(old.id, { state: 'stopped', nextAt: null, lastError: '' });
+    await closeKktixSession(old.id);
+    if (m.url !== old.url) {
+      delete m.diagnostic; delete m.lastDiagnosisCode;
+      await fs.unlink(sessionFile(old.id)).catch(() => {});
+      await fs.unlink(imageFile(old.id)).catch(() => {});
+    }
     store.monitors[idx] = m;
     await saveStore();
     res.json(publicMonitor(m));
@@ -446,8 +763,12 @@ app.delete('/api/monitors/:id', async (req, res) => {
   const idx = store.monitors.findIndex(x => x.id === req.params.id);
   if (idx < 0) return res.status(404).json({ error: 'not found' });
   clearTimeout(runtime.get(req.params.id)?.timer);
+  const removed = store.monitors[idx]; removed.running = false;
   runtime.delete(req.params.id);
   store.monitors.splice(idx, 1);
+  await closeKktixSession(removed.id);
+  await fs.unlink(sessionFile(removed.id)).catch(() => {});
+  await fs.unlink(imageFile(removed.id)).catch(() => {});
   await saveStore();
   res.json({ ok: true });
 });
@@ -455,29 +776,60 @@ app.delete('/api/monitors/:id', async (req, res) => {
 app.post('/api/monitors/:id/start', async (req, res) => {
   const m = store.monitors.find(x => x.id === req.params.id);
   if (!m) return res.status(404).json({ error: 'not found' });
-  m.running = true; m.lastError = ''; m.detectedAt = '';
-  await saveStore();
-  setTimeout(() => runMonitor(m.id), 50);
+  if (m.running) return res.json(publicMonitor(m));
+  if (activeRuns.has(m.id) || activeInspections.has(m.id)) return res.status(409).json({ error: '前一次檢查還在結束中，請稍後再試。' });
+  if (m.retryAfterAt > Date.now()) return res.status(429).json({ error: '網站要求等待，請稍後再開始。' });
+  m.running = true; m.lastError = ''; m.pauseReason = ''; m.detectedAt = ''; m.detected = false;
+  runtime.set(m.id, { ...runtime.get(m.id), state: 'running', lastError: '' });
+  await saveStore(); scheduleNext(m, 0.05);
   res.json(publicMonitor(m));
 });
 
 app.post('/api/monitors/:id/stop', async (req, res) => {
   const m = store.monitors.find(x => x.id === req.params.id);
   if (!m) return res.status(404).json({ error: 'not found' });
-  m.running = false;
+  m.running = false; m.pauseReason = '';
   clearTimeout(runtime.get(m.id)?.timer);
   runtime.set(m.id, { ...runtime.get(m.id), state: 'stopped', nextAt: null });
-  await saveStore();
-  res.json(publicMonitor(m));
+  if (!activeInspections.has(m.id)) await closeKktixSession(m.id);
+  await saveStore(); res.json(publicMonitor(m));
 });
 
 app.post('/api/monitors/:id/test', async (req, res) => {
   const m = store.monitors.find(x => x.id === req.params.id);
   if (!m) return res.status(404).json({ error: 'not found' });
+  if (m.running || activeInspections.has(m.id) || activeRuns.has(m.id)) return res.status(409).json({ error: '請先停止這筆監控，等目前檢查結束後再測試抓取。' });
+  runtime.set(m.id, { ...runtime.get(m.id), state: 'checking', nextAt: null, lastError: '' });
   try {
-    const result = await inspect(m);
-    res.json({ ok: true, siteType: siteType(m.url), result });
-  } catch (e) { res.status(400).json({ error: e.message, pause: !!e.pause }); }
+    const result = await inspect(m, { diagnostic: true });
+    const t = nowParts(); m.lastCheck = `${t.date} ${t.time}`;
+    m.lastResult = result.summary; m.lastError = ''; m.pauseReason = '';
+    runtime.set(m.id, { ...runtime.get(m.id), state: 'stopped', lastError: '', nextAt: null });
+    await saveStore(); res.json({ ok: true, siteType: siteType(m.url), result });
+  } catch (error) {
+    const t = nowParts(); m.lastCheck = `${t.date} ${t.time}`; m.lastError = error.message;
+    if (siteType(m.url) === 'kktix') m.lastResult = '本次無法判斷票況（不代表售完）';
+    m.pauseReason = error.pause ? (error.diagnosticCode || error.code || 'restricted') : '';
+    runtime.set(m.id, { ...runtime.get(m.id), state: error.pause ? 'paused' : 'error', lastError: error.message, nextAt: null });
+    await saveStore();
+    res.status(400).json({ error: error.message, pause: !!error.pause, diagnosticCode: error.diagnosticCode || error.code || '', hasDiagnostic: !!m.diagnostic });
+  }
+});
+
+app.get('/api/info', (req, res) => res.json({ version: BUILD_VERSION, minSeconds: MIN_SECONDS }));
+app.get('/api/monitors/:id/diagnostic', (req, res) => {
+  if (!ADMIN_PASSWORD) return res.status(403).json({ error: '請先設定 ADMIN_PASSWORD，才能開啟受保護的抓取畫面。' });
+  const m = store.monitors.find(x => x.id === req.params.id);
+  if (!m) return res.status(404).json({ error: 'not found' });
+  if (!m.diagnostic) return res.status(404).json({ error: '還沒有診斷資料，請先按「測試抓取」。' });
+  res.json({ ...m.diagnostic, imageUrl: m.diagnostic.imageAvailable ? `/api/monitors/${encodeURIComponent(m.id)}/diagnostic/image` : null });
+});
+app.get('/api/monitors/:id/diagnostic/image', async (req, res) => {
+  if (!ADMIN_PASSWORD) return res.status(403).send('Authentication must be configured');
+  const m = store.monitors.find(x => x.id === req.params.id);
+  if (!m || !m.diagnostic?.imageAvailable) return res.status(404).send('No diagnostic image');
+  try { res.type('image/jpeg').send(await fs.readFile(imageFile(m.id))); }
+  catch { res.status(404).send('Diagnostic image unavailable'); }
 });
 
 app.post('/api/monitors/:id/test-notification', async (req, res) => {
@@ -489,12 +841,31 @@ app.post('/api/monitors/:id/test-notification', async (req, res) => {
   } catch (e) { res.status(400).json({ error: e.message }); }
 });
 
-app.get('/healthz', (req, res) => res.json({ ok: true }));
+app.get('/healthz', (req, res) => res.json({ ok: true, version: BUILD_VERSION }));
+
+app.use((error, req, res, next) => {
+  console.error('[Monitor] request error:', error.message);
+  if (!res.headersSent) res.status(500).json({ error: '儲存或伺服器處理失敗，請查看 Railway Logs。' });
+});
 
 app.listen(PORT, () => console.log(`Ticket Cloud Monitor listening on :${PORT}`));
 
 for (const m of store.monitors) {
-  if (m.running) setTimeout(() => runMonitor(m.id), 500 + Math.random() * 1500);
+  if (m.running) setTimeout(() => dispatchMonitor(m.id), 500 + Math.random() * 1500);
 }
 
-process.on('SIGTERM', async () => { if (browser) await browser.close(); process.exit(0); });
+const idleCleanup = setInterval(() => {
+  for (const [id, session] of kktixSessions) {
+    if (!activeInspections.has(id) && Date.now() - session.usedAt > 10 * 60 * 1000) closeKktixSession(id).catch(() => {});
+  }
+}, 60000);
+idleCleanup.unref();
+async function shutdown() {
+  shuttingDown = true;
+  for (const r of runtime.values()) clearTimeout(r.timer);
+  await saveQueue.catch(() => {});
+  if (browser) await browser.close().catch(() => {});
+  process.exit(0);
+}
+process.on('SIGTERM', shutdown);
+process.on('SIGINT', shutdown);
