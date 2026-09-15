@@ -18,7 +18,7 @@ function fillForm(m){
   editingId = m.id;
   $('#name').value=m.name||''; $('#url').value=m.url||'';
   document.querySelector(`input[name="intervalMode"][value="${m.intervalMode||'random'}"]`).checked=true;
-  $('#fixedSeconds').value=m.fixedSeconds||15; $('#minSeconds').value=m.minSeconds||8; $('#maxSeconds').value=m.maxSeconds||15;
+  $('#fixedSeconds').value=m.fixedSeconds||5; $('#minSeconds').value=m.minSeconds||1; $('#maxSeconds').value=m.maxSeconds||5;
   $('#limitedTime').checked=!!m.limitedTime; $('#startTime').value=m.startTime||'11:55'; $('#endTime').value=m.endTime||'12:30';
   $('#detectionMode').value=m.detectionMode||'auto'; $('#watchText').value=m.watchText||'已售完'; $('#watchCondition').value=m.watchCondition||'disappears'; $('#ntfyTopic').value=m.ntfyTopic||''; updateCustomRule();
   $('#save').textContent='更新監控'; $('#cancelEdit').hidden=false;
@@ -26,7 +26,10 @@ function fillForm(m){
 }
 
 function resetForm(){
-  editingId=null; $('#name').value=''; $('#url').value=''; $('#detectionMode').value='auto'; updateCustomRule(); $('#save').textContent='新增監控'; $('#cancelEdit').hidden=true;
+  editingId=null; $('#name').value=''; $('#url').value='';
+  document.querySelector('input[name="intervalMode"][value="random"]').checked=true;
+  $('#fixedSeconds').value=5; $('#minSeconds').value=1; $('#maxSeconds').value=5;
+  $('#detectionMode').value='auto'; updateCustomRule(); $('#save').textContent='新增監控'; $('#cancelEdit').hidden=true;
 }
 
 async function api(url, opts={}){
