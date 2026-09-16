@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ticket Plus Linked Monitor
 // @namespace    local.ticket-monitor.se2
-// @version      1.1.1
+// @version      1.1.2
 // @description  Ticket Plus 單場前景監控：選票種、排除身障票、重整後繼續、ntfy 提醒。不代購、不匯出登入資訊。
 // @match        https://ticketplus.com.tw/*
 // @match        https://www.ticketplus.com.tw/*
@@ -10,13 +10,9 @@
 // @noframes
 // @grant        GM.getValue
 // @grant        GM.setValue
-// @grant        GM.getTab
-// @grant        GM.saveTab
 // @grant        GM.xmlHttpRequest
 // @grant        GM_getValue
 // @grant        GM_setValue
-// @grant        GM_getTab
-// @grant        GM_saveTab
 // @grant        GM_xmlhttpRequest
 // @connect      ntfy.sh
 // @connect      ticket-cloud-monitor-production.up.railway.app
@@ -33,26 +29,12 @@
 (() => {
   'use strict';
   if (window.top !== window.self) return;
-  const VERSION = '1.1.1';
+  const VERSION = '1.1.2';
 
   const rawGM = typeof GM === 'undefined' ? {} : GM;
   const adapter = {
     getValue: (k,d) => typeof rawGM.getValue==='function' ? rawGM.getValue(k,d) : Promise.resolve(GM_getValue(k,d)),
     setValue: (k,v) => typeof rawGM.setValue==='function' ? rawGM.setValue(k,v) : Promise.resolve(GM_setValue(k,v)),
-    getTab: () => typeof rawGM.getTab==='function' ? rawGM.getTab() : new Promise(resolve=>GM_getTab(resolve)),
-    saveTab: t => {
-      if (typeof rawGM.saveTab==='function') return rawGM.saveTab(t);
-      return new Promise((resolve,reject)=>{
-        let done=false;
-        const finish=()=>{ if(done)return; done=true; resolve(); };
-        try {
-          GM_saveTab(t, finish);
-          // Some Tampermonkey builds do not invoke the optional callback reliably.
-          // Saving is synchronous from the userscript point of view, so don't let Start hang forever.
-          setTimeout(finish, 250);
-        } catch(e) { reject(e); }
-      });
-    },
     xmlHttpRequest: d => typeof rawGM.xmlHttpRequest==='function' ? rawGM.xmlHttpRequest(d) : GM_xmlhttpRequest(d)
   };
   const LINK_ORIGIN='https://ticket-cloud-monitor-production.up.railway.app';
@@ -267,7 +249,7 @@
     <button id="toggle">監票</button>
     <section id="panel">
       <div class="line top"><strong>Ticket Plus 電腦 / SE2 監控</strong><button id="collapse">收合</button></div>
-      <div class="small">1.1.1 · 本機執行 · 只監控目前單場</div>
+      <div class="small">1.1.2 · Windows 修正版 · 本機執行</div>
       <p id="status">正在啟動…</p>
       <p id="notice"></p>
       <details id="linkDetails"><summary>連到原本的管理頁（電腦 / SE2 共用）</summary>
@@ -307,12 +289,13 @@
   const $ = id => shadow.getElementById(id);
   let settings = { name:'Ticket Plus 票況', topic:'', exclude:true, mode:'random', min:1, max:5, fixed:5, scheduled:false, startAt:'', endAt:'', pauseAlerts:true, sound:false, selected:[], verified:false };
   let runtime = { url:'', running:false, checks:0, message:'待設定', nextAt:0, pending:null };
-  let tabData = {}, rows = [], selected = new Set(), settingURL = '', loadingProfile = false;
+  let rows = [], selected = new Set(), settingURL = '', loadingProfile = false;
   let cycleToken = 0, reloadTimer = null, busy = false, audioContext = null;
   let pickMode = false, picked = null, previousOutline = '';
-  let storageQueue = Promise.resolve();
   let link = null, localClientId = "", remoteConfig = null, relayQueue=Promise.resolve();
-  const hasGM = (typeof rawGM.getValue==='function' || typeof GM_getValue==='function') && (typeof rawGM.getTab==='function' || typeof GM_getTab==='function') && (typeof rawGM.xmlHttpRequest==='function' || typeof GM_xmlhttpRequest==='function');
+  const hasGM = (typeof rawGM.getValue==='function' || typeof GM_getValue==='function') &&
+    (typeof rawGM.setValue==='function' || typeof GM_setValue==='function') &&
+    (typeof rawGM.xmlHttpRequest==='function' || typeof GM_xmlhttpRequest==='function');
   const notice = s => { $('notice').textContent = s; };
   function panel(show) { $('panel').hidden = !show; }
   function setStatus(s) {
@@ -330,13 +313,12 @@
     for (const id of ['name','topic','exclude','verified','mode','min','max','fixed','scheduled','startAt','endAt','pauseAlerts','sound'])
       $(id).disabled = !!runtime.running || (!!link && ['name','topic','exclude','mode','min','max','fixed','scheduled','startAt','endAt'].includes(id));
   }
-  function saveRuntime() {
+  function runtimeStorageKey(url = settingURL || canonicalURL()) {
+    return `${RUNTIME_KEY}.${url}`;
+  }
+  async function saveRuntime() {
     const snapshot = JSON.parse(JSON.stringify(runtime));
-    storageQueue = storageQueue.catch(() => {}).then(async () => {
-      tabData[RUNTIME_KEY] = snapshot;
-      await adapter.saveTab(tabData);
-    });
-    return storageQueue;
+    await adapter.setValue(runtimeStorageKey(runtime.url || settingURL || canonicalURL()), snapshot);
   }
   function readSettingsUI() {
     settings.name = $('name').value.trim().slice(0,80) || 'Ticket Plus 票況';
@@ -671,6 +653,8 @@
     const btn=$(id), oldText=btn.textContent;
     btn.disabled=true;
     if(id==='start') btn.textContent='啟動中…';
+    if(id==='scan') btn.textContent='讀取中…';
+    if(id==='saveLocalSelection') btn.textContent='儲存中…';
     try { await fn(); } catch(e) {
       const msg=e?.message || String(e);
       notice('無法執行：'+msg);
@@ -700,10 +684,10 @@
     try{const cfg=await relay('sync');await adapter.setValue('tcm.link.'+settingURL,link);$('pairInput').value='';applyShared(cfg,true);await adapter.setValue(SETTING_PREFIX+settingURL,settings);notice('\u914d\u5c0d\u5b8c\u6210\u3002\u8acb\u8b80\u53d6\u7968\u7a2e\u3001\u6838\u5c0d\u5f8c\u5132\u5b58\u3002');}catch(e){link=previous;throw e;}
   });
   action('pullLink',async()=>{if(runtime.running)throw Error('\u8acb\u5148\u505c\u6b62\u3002');await pullShared();});
-  action('saveLocalSelection',saveSharedSelection);
+  action('saveLocalSelection',async()=>{notice('正在儲存票種…'); await saveSharedSelection();});
   action('unlink',async()=>{await halt('\u5df2\u53d6\u6d88\u672c\u6a5f\u914d\u5c0d\u3002');await adapter.setValue('tcm.link.'+settingURL,null);link=null;remoteConfig=null;renderStatus();});
 
-  action('scan',async()=>{await ensureProfile();await scan();});
+  action('scan',async()=>{notice('正在讀取票種…'); setStatus('正在讀取票種…'); renderStatus(); await ensureProfile(); await scan();});
   action('start',start);
   action('stop',async()=>{unpick();await halt('已手動停止。');});
   action('retry',sendPending);
@@ -759,15 +743,15 @@
     }
   });
   if (!hasGM) {
-    setStatus('缺少 Userscripts GM API。請用最新版 Userscripts 啟用此 .user.js 檔，不是貼到網址列。');
+    setStatus('Tampermonkey 權限不完整：需要 GM 儲存與跨網域請求權限。請重新安裝此腳本。');
     $('start').disabled=true;$('scan').disabled=true;$('testPush').disabled=true;
     return;
   }
   (async()=>{
-    const saved=await adapter.getTab();tabData=saved&&typeof saved==='object'?saved:{};
-    localClientId=tabData.tcmClientId || uniqueId();tabData.tcmClientId=localClientId;
-    const restored=tabData[RUNTIME_KEY];
+    localClientId=await adapter.getValue('tcm.clientId','');
+    if(!localClientId){ localClientId=uniqueId(); await adapter.setValue('tcm.clientId',localClientId); }
     await ensureProfile();
+    const restored=await adapter.getValue(runtimeStorageKey(settingURL),null);
     if (restored&&restored.url===settingURL) {
       runtime={...runtime,...restored,nextAt:0};
       if (runtime.running) {
