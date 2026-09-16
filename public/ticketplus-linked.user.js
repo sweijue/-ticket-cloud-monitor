@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ticket Plus Linked Monitor
 // @namespace    local.ticket-monitor.se2
-// @version      1.2.0
+// @version      1.3.0
 // @description  Ticket Plus 單場前景監控：選票種、排除身障票、重整後繼續、ntfy 提醒。不代購、不匯出登入資訊。
 // @match        https://ticketplus.com.tw/*
 // @match        https://www.ticketplus.com.tw/*
@@ -29,7 +29,7 @@
 (() => {
   'use strict';
   if (window.top !== window.self) return;
-  const VERSION = '1.2.0';
+  const VERSION = '1.3.0';
 
   const rawGM = typeof GM === 'undefined' ? {} : GM;
   const adapter = {
@@ -120,79 +120,115 @@
       return plus && enabled(b);
     });
   }
-  function rowEvidence(el) {
+  function cleanTicketLabel(source, price=0) {
+    let out = norm(source || '');
+    if (price) {
+      const p = String(price).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+      out = out.replace(new RegExp(`(?:NT\\s*\\$|NTD|TWD|\\$)?\\s*${p.replace(/,/g,'[,]?')}\\s*(?:元)?`, 'gi'), ' ');
+    }
+    return norm(out
+      .replace(/(?:NT\s*\$|NTD|TWD|\$)\s*\d[\d,]*|\d[\d,]*\s*元|(?:票價|售價|價格)\s*[:：]?\s*\d[\d,]*/gi, ' ')
+      .replace(/(?:庫存(?:量)?|剩餘(?:票券|票數|數量|座位)?|可售(?:票數|數量)?|空位|remaining)\s*[:：]?\s*\d[\d,]*\s*(?:張|席|個|tickets)?/gi, ' ')
+      .replace(/已售完|已售罄|售罄|完售|售完|售光|已額滿|額滿|缺貨|尚未開賣|尚未開放|尚未開售|未開賣|暫停販售|停止販售|販售結束|已截止|sold\s*out|not available|unavailable|coming soon|not on sale/gi, ' ')
+      .replace(/尚有票券|尚有票|可購買|可選購|available/gi, ' ')
+      .replace(/請選擇(?:數量)?|選擇數量|購買數量|數量|增加數量|減少數量|加入購物車|下一步|立即購票/gi, ' ')
+      .replace(/[+＋−|]/g, ' ')).slice(0, 180);
+  }
+  function nearestLeafPrice(seed, scope) {
+    const leaves = [...scope.querySelectorAll('span,p,div,td,li,b,strong,label')].filter(x =>
+      visible(x) && !x.children.length && prices(text(x)).length === 1
+    );
+    if (!leaves.length) return null;
+    let best = leaves[0], bestScore = 1e9;
+    for (const el of leaves) {
+      let score = 0, n = seed?.nodeType === 1 ? seed : seed?.parentElement;
+      while (n && n !== scope && !n.contains(el)) { score++; n=n.parentElement; if(score>20)break; }
+      if (score < bestScore) { bestScore=score; best=el; }
+    }
+    return prices(text(best))[0] || null;
+  }
+  function makeRow(el, seed=null, relaxed=false) {
     if (!visible(el)) return null;
     const s = text(el);
-    if (s.length < 4 || s.length > 650 || INSTRUCTIONS.test(s)) return null;
+    if (s.length < 2 || s.length > (relaxed ? 1400 : 900) || INSTRUCTIONS.test(s)) return null;
     const ps = prices(s);
-    if (ps.length !== 1) return null;
-    const label = stableName(el, s);
+    if (!ps.length) return null;
+    const price = ps.length === 1 ? ps[0] : nearestLeafPrice(seed || el, el);
+    if (!price) return null;
+    let label = stableName(el, s);
+    if (!label || label.length < 2) label = cleanTicketLabel(s, price);
     if (label.length < 2 || !/[a-z\u3400-\u9fff]/i.test(label)) return null;
     const controls = [...el.querySelectorAll(QTY_SELECTOR)].filter(visible);
     const validSelect = controls.find(q => q.tagName === 'SELECT' && enabled(q) &&
       [...q.options].some(o => !o.disabled && /^\d+$/.test(String(o.value).trim()) && Number(o.value) > 0));
     const validInput = controls.find(q => q.tagName !== 'SELECT' && enabled(q) &&
-      q.hasAttribute('max') && Number(q.getAttribute('max')) > 0);
+      (!q.hasAttribute('max') || Number(q.getAttribute('max')) > 0));
     const plus = plusControl(el);
     const count = countEvidence(s);
-    let state = 'unknown', reason = '未找到可確認的售完或數量證據';
+    const disabledQty = controls.length && controls.every(q => !enabled(q));
+    let state = 'unknown', reason = '目前沒有明確可購買證據；仍可監控，只有出現可購買證據時才通知';
     if (SOLD.test(s)) { state = 'sold'; reason = '票種列顯示售完／缺貨'; }
     else if (FUTURE.test(s)) { state = 'not_started'; reason = '尚未開賣、暫停或販售結束'; }
     else if (count === 0) { state = 'sold'; reason = '票種列剩餘數量為 0'; }
     else if (validSelect) { state = 'available'; reason = '此票種有可選的正數張數'; }
-    else if (validInput) { state = 'available'; reason = '此票種數量欄啟用且 max > 0'; }
+    else if (validInput) { state = 'available'; reason = '此票種數量欄可操作'; }
     else if (plus) { state = 'available'; reason = '此票種增加張數按鈕啟用'; }
-    else if (count > 0 && !controls.some(q => !enabled(q))) { state = 'available'; reason = `此票種明示剩餘 ${count}`; }
-    const semantic = /ticket|price|area|tickettype/i.test(String(el.className || '')) ||
+    else if (count > 0) { state = 'available'; reason = `此票種明示剩餘 ${count}`; }
+    else if (disabledQty) { state = 'sold'; reason = '此票種數量控制目前不可用'; }
+    const semantic = /ticket|price|area|tickettype|product|order/i.test(String(el.className || '')) ||
       el.matches('tr,[role="row"],[data-ticket-id],[data-ticket-type-id],[data-price-id]');
-    if (state === 'unknown' && !controls.length && !semantic) return null;
+    if (!relaxed && state === 'unknown' && !controls.length && !semantic) return null;
     const explicit = ['data-ticket-id', 'data-ticket-type-id', 'data-price-id', 'data-area-id']
       .map(a => el.getAttribute(a)).find(Boolean);
-    const key = explicit ? `id:${explicit}|${ps[0]}` : `label:${label.toLowerCase()}|${ps[0]}`;
-    return { key, label, price: ps[0], state, reason, accessible: ACCESSIBLE.test(label), preview: s.slice(0, 240), el };
+    const selector = selectorFor(el);
+    const key = explicit ? `id:${explicit}|${price}` : `sel:${selector}|${price}`;
+    return { key, label, price, state, reason, accessible: ACCESSIBLE.test(label), preview: s.slice(0, 300), el, selector };
   }
-  function findRow(seed) {
+  function rowEvidence(el) { return makeRow(el, el, false); }
+  function findRow(seed, relaxed=false) {
     let el = seed?.nodeType === 1 ? seed : seed?.parentElement;
-    for (let n = 0; el && n < 7 && !el.matches('body,html,main,#app'); n++, el = el.parentElement) {
-      const row = rowEvidence(el);
-      if (row) return row;
+    let fallback = null;
+    for (let n = 0; el && n < 14 && !el.matches('body,html'); n++, el = el.parentElement) {
+      if (el.closest(`#${HOST_ID}`)) return null;
+      const row = makeRow(el, seed, relaxed);
+      if (!row) continue;
+      if (row.state !== 'unknown' || el.querySelector(QTY_SELECTOR) || /ticket|price|area/i.test(String(el.className||''))) return row;
+      fallback ||= row;
     }
-    return null;
+    return fallback;
   }
   function detectRows(root = document) {
     const seeds = new Set(root.querySelectorAll(
-      '[data-ticket-id],[data-ticket-type-id],[data-price-id],.ticket-item,.ticket-row,.ticket-type,.ticket-card,.ticketInfo,' +
-      'tr,[role="row"],.v-list-item,select,input[type="number"],[role="spinbutton"]'
+      '[data-ticket-id],[data-ticket-type-id],[data-price-id],[class*="ticket"],[class*="Ticket"],[class*="price"],[class*="Price"],' +
+      'tr,[role="row"],.v-list-item,select,input[type="number"],[role="spinbutton"],button'
     ));
-    for (const el of root.querySelectorAll('span,p,div,td,li,button')) {
-      if (el.children.length || el.closest(`#${HOST_ID},nav,header,footer,script,style`)) continue;
+    for (const el of root.querySelectorAll('span,p,div,td,li,label,strong,b')) {
+      if (el.closest(`#${HOST_ID},nav,header,footer,script,style`)) continue;
       const s = norm(el.textContent);
-      if (s.length > 0 && s.length < 180 && (prices(s).length || SOLD.test(s) || FUTURE.test(s))) seeds.add(el);
-      if (seeds.size >= 500) break;
+      if (s.length > 0 && s.length < 220 && (prices(s).length || SOLD.test(s) || FUTURE.test(s))) seeds.add(el);
+      if (seeds.size >= 1200) break;
     }
     const candidates = new Map();
     for (const seed of seeds) {
-      const row = findRow(seed);
+      const row = findRow(seed, true);
       if (row) candidates.set(row.el, row);
     }
     const all = [...candidates.values()];
-    // Never treat the parent of two different ticket rows as one "ticket".
-    const minimal = all.filter(a => !all.some(b => a.el !== b.el && a.el.contains(b.el)));
+    const minimal = all.filter(a => !all.some(b => a.el !== b.el && a.el.contains(b.el) && b.price === a.price));
     const grouped = new Map();
     for (const row of minimal) {
-      if (!grouped.has(row.key)) grouped.set(row.key, []);
-      grouped.get(row.key).push(row);
+      const groupKey = `${row.label.toLowerCase()}|${row.price}`;
+      if (!grouped.has(groupKey)) grouped.set(groupKey, []);
+      grouped.get(groupKey).push(row);
     }
     const out = [];
     for (const group of grouped.values()) {
       const first = group[0];
-      // Responsive duplicate copies with identical state can be collapsed.
-      // Conflicting duplicates are ambiguous; never produce an availability alert.
-      if (group.some(r => r.state !== first.state)) {
-        out.push({ ...first, state: 'unknown', reason: '同名票種有不同狀態，請用點選方式確認' });
-      } else out.push(first);
+      if (group.some(r => r.state !== first.state && r.state !== 'unknown' && first.state !== 'unknown'))
+        out.push({ ...first, state:'unknown', reason:'同名票種有不同狀態，請手動核對' });
+      else out.push(group.find(r=>r.state!=='unknown') || first);
     }
-    return out.slice(0, 100);
+    return out.slice(0, 150);
   }
   function pageGate() {
     const body = text(document.body);
@@ -249,7 +285,7 @@
     <button type="button" id="toggle">監票</button>
     <section id="panel">
       <div class="line top"><strong>Ticket Plus 電腦 / SE2 監控</strong><button type="button" id="collapse">收合</button></div>
-      <div class="small">1.2.0 · 多選票種修正版 · 本機執行</div>
+      <div class="small">1.3.0 · 遠大票種辨識＋連續多選版 · 本機執行</div>
       <p id="status">正在啟動…</p>
       <p id="notice"></p><p id="debugAction" class="small">最後操作：尚未操作</p>
       <details id="linkDetails"><summary>連到原本的管理頁（電腦 / SE2 共用）</summary>
@@ -261,10 +297,10 @@
       <button type="button" id="unlink">取消這台裝置配對</button>
       <p class="small">配對後，名稱、頻率、時段、Topic 由管理頁統一設定。售票網站登入狀態留在這台裝置，不會上傳。</p></details>
 
-      <div class="line"><button type="button" id="scan">讀取票種</button><button type="button" id="pick">點選票種</button></div>
+      <div class="line"><button type="button" id="scan">自動讀取票種</button><button type="button" id="pick">手動多選票種</button></div>
       <div id="picker" hidden>
-        <div id="pickText">面板會收起，請點網頁上的一個票種。</div>
-        <div class="line"><button type="button" id="pickAdd">加入這個票種</button><button type="button" id="pickCancel">取消</button></div>
+        <div id="pickText">面板會收起。請在售票頁連續點選一個或多個票種；每點一次就會立即加入／取消。完成後按左下角「已選 X 個｜點我完成」。</div>
+        <div class="line"><button type="button" id="pickAdd">完成選擇</button><button type="button" id="pickCancel">取消</button></div>
       </div>
       <label><input id="exclude" type="checkbox" checked> 排除身障／輪椅／陪同票</label>
       <div id="selectionSummary" style="padding:8px;background:#f4f7fa;border-radius:8px;margin:8px 0">已選 0 個票種</div>
@@ -294,6 +330,7 @@
   let rows = [], selected = new Set(), settingURL = '', loadingProfile = false;
   let cycleToken = 0, reloadTimer = null, busy = false, audioContext = null;
   let pickMode = false, picked = null, previousOutline = '';
+  const manualOutlines = new Map();
   let link = null, localClientId = "", remoteConfig = null, relayQueue=Promise.resolve();
   const hasGM = (typeof rawGM.getValue==='function' || typeof GM_getValue==='function') &&
     (typeof rawGM.setValue==='function' || typeof GM_setValue==='function') &&
@@ -498,7 +535,7 @@
       }
       // Match by stable ticket name/price or a website-provided ID; never by list position.
       lastRows=settings.selected.map(w=>map.get(w.key) || {...w,state:'missing',reason:'這次頁面沒有找到原本勾選的票種'});
-      const missing=lastRows.some(r=>r.state==='missing'||r.state==='unknown');
+      const missing=lastRows.some(r=>r.state==='missing');
       const stamp=rowStamp(lastRows);
       if (!missing && lastRows.length && stamp===previous) same++; else same=0;
       previous=stamp;
@@ -506,7 +543,7 @@
       runtime.message=missing?'正在等待票種載入／辨識（最多 30 秒）':'正在確認票種狀態…';
       renderStatus(); await sleep(800);
     }
-    const missing=lastRows.filter(r=>r.state==='missing'||r.state==='unknown').map(r=>r.label).join('、');
+    const missing=lastRows.filter(r=>r.state==='missing').map(r=>r.label).join('、');
     throw Error(`30 秒內未能確認票種：${missing || '頁面沒有完整票況'}。已停止，不會當成售完或有票。`);
   }
   async function beep() {
@@ -571,7 +608,10 @@
   }
   function unpick() {
     if (picked?.el) picked.el.style.outline=previousOutline;
+    for (const [el, outline] of manualOutlines) { try { el.style.outline=outline; } catch(_) {} }
+    manualOutlines.clear();
     picked=null; pickMode=false; $('picker').hidden=true;
+    $('toggle').textContent = runtime.running ? '監票 · 執行中' : '監票 · 已停止';
   }
   async function scan() {
     if (runtime.running) await halt('已停止刷新，重新讀取票種。');
@@ -582,7 +622,7 @@
     selected=new Set(rows.filter(r=>old.size && old.has(r.key) && !(settings.exclude&&r.accessible)).map(r=>r.key));
     settings.verified=false; $('verified').checked=false;
     renderRows();
-    notice(rows.length?`讀到 ${rows.length} 個候選票種。請用勾選框選一個或多個票種；上方會即時顯示已選項目。`:'未辨識到完整票種。請試「點選票種」，不用輸入監控文字。');
+    notice(rows.length?`讀到 ${rows.length} 個候選票種。請直接勾選一個或多個；如果名稱不對，可改用「手動多選票種」。`:'自動辨識仍找不到票種。請按「手動多選票種」，直接在售票頁連續點選票種列。');
   }
   async function start() {
     notice('正在啟動監控…');
@@ -591,7 +631,6 @@
     await ensureProfile();
     if (runtime.running) return;
     readSettingsUI(); validate(settings);
-    if (rows.filter(r=>selected.has(r.key)).some(r=>r.state==='unknown')) throw Error('勾選票種仍有「無法確認」，請先重新讀取或用點選方式確認。');
     await saveSettings();
     const savedPending=runtime.pending;
     if (savedPending && !confirm('還有未確認送達的通知。開始新監控會清除這筆待重送通知，確定嗎？')) return;
@@ -689,7 +728,10 @@
       if(!runtime.running || id!=='start') btn.disabled=false;
     }
   });
-  $('toggle').onclick=()=>panel($('panel').hidden);
+  $('toggle').onclick=()=>{
+    if (pickMode) { unpick(); panel(true); renderRows(); notice(`手動選擇完成，目前已選 ${selected.size} 個票種。請核對清單後勾選「我已核對」。`); return; }
+    panel($('panel').hidden);
+  };
   $('collapse').onclick=()=>panel(false);
   $('mode').onchange=updateOptions; $('scheduled').onchange=updateOptions;
   $('showTopic').onchange=()=>{$('topic').type=$('showTopic').checked?'text':'password';};
@@ -737,30 +779,42 @@
   action('pick',async()=>{
     await ensureProfile();
     if (!isOrder()) throw Error('請先開啟單場票種頁。');
-    if (runtime.running) await halt('已停止，請點選票種。');
-    unpick();pickMode=true;
-    $('picker').hidden=false;$('pickText').textContent='請點網頁上的一個票種名稱、價格或售完狀態；不會代你購買。';
-    notice('請點原售票頁的一列票種。');panel(false);$('toggle').textContent='請點票種 · 取消可按此';
+    if (runtime.running) await halt('已停止，準備手動選票種。');
+    unpick(); pickMode=true;
+    $('picker').hidden=false;
+    $('pickText').textContent='已進入連續多選：直接在售票頁點票種列。每點一次立即加入／取消；完成後按左下角按鈕。';
+    notice('手動多選中：請直接點售票頁上的票種名稱、價格或整列。');
+    panel(false); $('toggle').textContent=`已選 ${selected.size} 個｜點我完成`;
   });
-  action('pickAdd',async()=>{
-    if (!picked) throw Error('還沒選到完整的票種列。');
-    const row=picked;
-    if (!rows.some(r=>r.key===row.key)) rows.push(row);
-    if (!(settings.exclude&&row.accessible)) selected.add(row.key);
-    unpick();panel(true);settings.verified=false;$('verified').checked=false;renderRows();
-    notice(`已加入這個票種。現在共選 ${selected.size} 個；可繼續按「點選票種」加入更多。`);
-  });
-  action('pickCancel',async()=>{unpick();panel(true);renderStatus();});
+  action('pickAdd',async()=>{ unpick(); panel(true); renderRows(); notice(`手動選擇完成，目前已選 ${selected.size} 個票種。`); });
+  action('pickCancel',async()=>{unpick();panel(true);renderRows();renderStatus();});
   document.addEventListener('click',event=>{
     if (event.composedPath().includes(host)) return;
     if (pickMode) {
-      event.preventDefault();event.stopImmediatePropagation();
-      const row=findRow(event.target);
-      if (picked?.el) picked.el.style.outline=previousOutline;
-      if (!row) { picked=null;notice('這個位置沒有完整票種資料。請點包含票種名、價格、售完／數量欄的那一列。');panel(true);return; }
-      picked=row;previousOutline=row.el.style.outline;row.el.style.outline='3px solid #0c8276';
-      $('pickText').textContent=`${row.label}｜$${row.price}｜${stateLabel(row.state)}\n${row.reason}`;
-      $('picker').hidden=false;panel(true);
+      event.preventDefault(); event.stopImmediatePropagation();
+      const row=findRow(event.target, true);
+      if (!row) {
+        $('toggle').textContent=`沒抓到這一列｜已選 ${selected.size} 個`;
+        setTimeout(()=>{ if(pickMode)$('toggle').textContent=`已選 ${selected.size} 個｜點我完成`; },1200);
+        return;
+      }
+      if (!rows.some(r=>r.key===row.key)) rows.push(row);
+      const blocked=settings.exclude&&row.accessible;
+      if (blocked) {
+        $('toggle').textContent='已排除身障／輪椅票';
+        setTimeout(()=>{ if(pickMode)$('toggle').textContent=`已選 ${selected.size} 個｜點我完成`; },1200);
+        return;
+      }
+      if (selected.has(row.key)) {
+        selected.delete(row.key);
+        if (manualOutlines.has(row.el)) { row.el.style.outline=manualOutlines.get(row.el); manualOutlines.delete(row.el); }
+      } else {
+        selected.add(row.key);
+        if (!manualOutlines.has(row.el)) manualOutlines.set(row.el,row.el.style.outline);
+        row.el.style.outline='3px solid #0c8276';
+      }
+      settings.verified=false; $('verified').checked=false;
+      $('toggle').textContent=`已選 ${selected.size} 個｜點我完成`;
     } else if (runtime.running) {
       halt('你開始操作售票頁，已停止刷新。').catch(handleError);
     }
