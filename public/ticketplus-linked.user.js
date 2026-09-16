@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ticket Plus Linked Monitor
 // @namespace    local.ticket-monitor.se2
-// @version      1.5.1
+// @version      1.5.2
 // @description  Ticket Plus 單場前景監控：選票種、排除身障票、重整後繼續、ntfy 提醒。不代購、不匯出登入資訊。
 // @match        https://ticketplus.com.tw/*
 // @match        https://www.ticketplus.com.tw/*
@@ -28,7 +28,7 @@
  */
 (() => {
   'use strict';
-  const VERSION = '1.5.1';
+  const VERSION = '1.5.2';
 
   // Ticket Plus may render the ticket picker inside an iframe. The previous
   // implementation only listened in the top document (frame execution disabled + early return),
@@ -166,6 +166,21 @@
   const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
   const norm = s => String(s || '').normalize('NFKC').replace(/\u00a0/g, ' ').replace(/\s+/g, ' ').trim();
 
+  function hashTicketIdentity(value) {
+    let h = 2166136261;
+    for (const ch of String(value || '')) {
+      h ^= ch.codePointAt(0);
+      h = Math.imul(h, 16777619) >>> 0;
+    }
+    return h.toString(36);
+  }
+  function ticketIdentityKey(label, price=0, explicit='') {
+    const cleanLabel = norm(label).toLowerCase();
+    const base = explicit ? `id|${explicit}|${Number(price)||0}` : `label|${cleanLabel}|${Number(price)||0}`;
+    const shortLabel = cleanLabel.replace(/\s+/g,'').slice(0,36).replace(/[^a-z0-9\u3400-\u9fff_-]/gi,'');
+    return `tk:${hashTicketIdentity(base)}:${Number(price)||0}:${shortLabel || 'ticket'}`;
+  }
+
   function canonicalURL(href = location.href) {
     const u = new URL(href);
     return `${u.origin}${u.pathname.replace(/\/+$/, '')}`;
@@ -293,7 +308,7 @@
     const explicit = ['data-ticket-id', 'data-ticket-type-id', 'data-price-id', 'data-area-id']
       .map(a => el.getAttribute(a)).find(Boolean);
     const selector = selectorFor(el);
-    const key = explicit ? `id:${explicit}|${price}` : `sel:${selector}|${price}`;
+    const key = ticketIdentityKey(label, price, explicit || '');
     return { key, label, price, state, reason, accessible: ACCESSIBLE.test(label), preview: s.slice(0, 300), el, selector };
   }
   function rowEvidence(el) { return makeRow(el, el, false); }
@@ -442,7 +457,7 @@
     const targetSelector = selectorFor(target);
     const explicit = ['data-ticket-id','data-ticket-type-id','data-price-id','data-area-id']
       .map(a=>chosen.getAttribute?.(a) || target.getAttribute?.(a)).find(Boolean);
-    const key = explicit ? `id:${explicit}|${price||'na'}` : `manual:${selector || targetSelector}|${price||'na'}|${label.toLowerCase().slice(0,80)}`;
+    const key = ticketIdentityKey(label, price, explicit || '');
     return {key,label,price,state,reason,accessible:ACCESSIBLE.test(`${label} ${s}`),preview:s.slice(0,500),el:chosen,selector:selector || targetSelector,frameUrl:location.href};
   }
   function evidenceForSaved(saved) {
@@ -461,13 +476,52 @@
     return {...row,key:saved.key,label:saved.label || row.label,price:saved.price || row.price || 0,accessible:!!saved.accessible,selector:saved.selector || row.selector};
   }
   async function saveSelectionDraft() {
-    settings.selected = rows.filter(r=>selected.has(r.key)).map(serialRow);
+    settings.selected = selectedRowsForSave();
     settings.verified = false;
     try { await adapter.setValue(SETTING_PREFIX + settingURL, settings); } catch (_) {}
     renderSelectionSummary();
   }
 
   const serialRow = r => ({ key: r.key, label: r.label, price: r.price, accessible: r.accessible, selector:r.selector || selectorFor(r.el), frameUrl:r.frameUrl || '' });
+
+  function dedupeTicketRows(list=[]) {
+    const out = new Map();
+    for (const item of Array.isArray(list) ? list : []) {
+      if (!item) continue;
+      const row = {...item};
+      row.price = Number(row.price) || 0;
+      row.label = norm(row.label || (row.price ? `票價 ${row.price.toLocaleString()}` : '票種'));
+      row.key = String(row.key || '').startsWith('tk:') ? row.key : ticketIdentityKey(row.label, row.price, '');
+      if (!out.has(row.key)) out.set(row.key, row);
+      else {
+        const old = out.get(row.key);
+        out.set(row.key, {
+          ...old,
+          selector: old.selector || row.selector || '',
+          frameUrl: old.frameUrl || row.frameUrl || '',
+          accessible: !!(old.accessible || row.accessible)
+        });
+      }
+    }
+    return [...out.values()];
+  }
+  function selectedRowsForSave() {
+    const current = rows.filter(r => selected.has(r.key)).map(serialRow);
+    const fallback = (settings.selected || []).filter(r => selected.has(r.key));
+    return dedupeTicketRows(current.length ? current : fallback);
+  }
+  async function removeSelectedTicket(key) {
+    if (runtime.running) await halt('已停止監控，因為你修改了票種。');
+    const row = rows.find(r => r.key === key) || (settings.selected || []).find(r => r.key === key);
+    selected.delete(key);
+    settings.selected = dedupeTicketRows((settings.selected || []).filter(r => r.key !== key));
+    rows = rows.filter(r => r.key !== key);
+    settings.verified = false;
+    if ($('verified')) $('verified').checked = false;
+    renderRows();
+    await saveSelectionDraft();
+    notice(`已刪除：${row?.label || '票種'}。目前剩 ${selected.size} 個。`);
+  }
   const rowStamp = rows => JSON.stringify(rows.map(r => [r.key, r.state]).sort((a,b) => a[0].localeCompare(b[0])));
   const stateLabel = s => ({ available:'可選購', sold:'售完／0 張', not_started:'未開賣／已結束', unknown:'無法確認' }[s] || '無法確認');
 
@@ -491,12 +545,13 @@
       .small{font-size:12px;color:#516476}.warn{font-size:12px;color:#8b4e10}.ticket{padding:8px;border:1px solid #dde5ec;border-radius:9px;margin:6px 0;display:flex;gap:8px;align-items:flex-start}
       .ticket span{overflow-wrap:anywhere}.ticket.selected{border-color:#0c8276;background:#effcf8}.ticket b{font-size:14px}.ticket small{display:block;color:#516476}.ticket:has(input:disabled){opacity:.6}
       .ok{color:#14745d}.bad{color:#a33b32}#notice{white-space:pre-wrap;overflow-wrap:anywhere;font-size:13px}
+      #selectedManager{display:grid;gap:6px;margin:6px 0 10px}.selectedManageItem{display:flex;gap:8px;align-items:center;padding:7px 8px;border:1px solid #d9e2e8;border-radius:9px;background:#fff}.selectedManageItem span{flex:1;overflow-wrap:anywhere}.removeTicket{flex:none;min-height:32px;padding:5px 9px;border-color:#d3a4a4;color:#9a2f2f;background:#fff6f6}
       summary{cursor:pointer;padding:8px 0}#picker{border:2px solid #0c8276;padding:8px;background:#effcf8;border-radius:8px}
     </style>
     <button type="button" id="toggle">監票</button>
     <section id="panel">
       <div class="line top"><strong>Ticket Plus 電腦 / SE2 監控</strong><button type="button" id="collapse">收合</button></div>
-      <div class="small">${VERSION} · iframe / 多選修正版 · 本機執行</div>
+      <div class="small">${VERSION} · 票種去重／可刪除版 · 本機執行</div>
       <div id="stateCard" class="stopped">
         <div class="line top"><strong id="runTitle">⏹ 已停止</strong><span id="runChecks" class="small">0 次</span></div>
         <p id="status">正在啟動…</p>
@@ -519,6 +574,7 @@
       </div>
       <label><input id="exclude" type="checkbox" checked> 排除身障／輪椅／陪同票</label>
       <div id="selectionSummary" style="padding:8px;background:#f4f7fa;border-radius:8px;margin:8px 0">已選 0 個票種</div>
+      <div id="selectedManager"></div>
       <div class="line"><button type="button" id="selectAll">全選一般票種</button><button type="button" id="clearSelection">全部清除</button></div>
       <div id="tickets"><p class="small">先按「讀取票種」，再用勾選框一次選擇一個或多個票種。</p></div>
       <label><input id="verified" type="checkbox"> 我已核對票種名稱和狀態與網頁相符</label>
@@ -596,7 +652,7 @@
     if(link) settings.scheduled=false;
     settings.startAt = $('startAt').value;
     settings.endAt = $('endAt').value;
-    settings.selected = rows.filter(r => selected.has(r.key)).map(serialRow);
+    settings.selected = selectedRowsForSave();
     return settings;
   }
   function fillUI() {
@@ -618,11 +674,24 @@
     let chosen = rows.filter(r => selected.has(r.key));
     if (!chosen.length && Array.isArray(settings.selected) && settings.selected.length)
       chosen = settings.selected.filter(r => selected.has(r.key) || !selected.size);
+    chosen = dedupeTicketRows(chosen);
     const textValue = chosen.length
       ? `已選 ${chosen.length} 個：${chosen.map(r => r.price ? `${r.label} $${Number(r.price).toLocaleString()}` : r.label).join('、')}`
       : '已選 0 個票種';
     const box = $('selectionSummary'); if (box) box.textContent = textValue;
     const top = $('selectionSummaryTop'); if (top) top.textContent = textValue;
+    const manager = $('selectedManager');
+    if (manager) {
+      manager.replaceChildren();
+      for (const row of chosen) {
+        const item=document.createElement('div'); item.className='selectedManageItem';
+        const name=document.createElement('span');
+        name.textContent=row.price ? `${row.label} · $${Number(row.price).toLocaleString()}` : row.label;
+        const del=document.createElement('button'); del.type='button'; del.className='removeTicket'; del.textContent='刪除';
+        del.addEventListener('click', e=>{ e.preventDefault(); e.stopPropagation(); removeSelectedTicket(row.key).catch(handleError); });
+        item.append(name,del); manager.appendChild(item);
+      }
+    }
   }
 
   function renderRows() {
@@ -850,13 +919,14 @@
     const price=Number(item.price)||0;
     const frameUrl=String(item.frameUrl||'');
     const selector=String(item.selector||'');
-    const key=`frame:${frameUrl}|${selector}|${price||'na'}|${label.toLowerCase().slice(0,80)}`;
+    const key=ticketIdentityKey(label, price, '');
     return {key,label,price,state:item.state||'unknown',reason:item.reason||'手動選取',accessible:!!item.accessible,preview:String(item.preview||'').slice(0,500),el:null,selector,frameUrl};
   }
   async function toggleManualRow(row, source='頁面') {
     if (!row) return;
     $('debugAction').textContent=`最後操作：${source}選取「${row.label}」（${new Date().toLocaleTimeString()}）`;
-    if (!rows.some(r=>r.key===row.key)) rows.push(row);
+    row={...row,key:ticketIdentityKey(row.label, Number(row.price)||0, '')};
+    rows=dedupeTicketRows([...rows,row]);
     if (settings.exclude && row.accessible) {
       $('toggle').textContent='已排除身障／輪椅票';
       setTimeout(()=>{ if(pickMode)$('toggle').textContent=`已選 ${selected.size} 個｜點我完成`; },1200);
@@ -913,6 +983,7 @@
     const gate=pageGate(); if (gate) throw Error(gate);
     if (!isOrder()) throw Error('請先在 Ticket Plus 打開單場 /order/ 票種頁。');
     const detected=detectRows();
+    settings.selected=dedupeTicketRows(settings.selected);
     const old=new Set(settings.selected.map(r=>r.key));
     if (detected.length) {
       rows=detected;
@@ -971,6 +1042,7 @@
       link=await adapter.getValue('tcm.link.'+u,null);
       $('deviceName').value=link?.deviceName || (/Win/i.test(navigator.platform)?'Windows':'SE2');
       if (!Array.isArray(settings.selected)) settings.selected=[];
+      settings.selected=dedupeTicketRows(settings.selected);
       rows=settings.selected.map(w=>({...w,state:'unknown',reason:'已儲存，等待重新讀取'}));
       selected=new Set(settings.selected.map(w=>w.key)); fillUI(); renderRows();
       if (!isOrder()) setStatus('請進入登入後的單場票種頁；目前不會刷新。');
@@ -1001,7 +1073,7 @@
     for(const k of ['name','topic','mode','min','max','fixed','exclude']) settings[k]=cfg[k];
     settings.scheduled=false;
     if(replaceSelection){
-      const incoming=cfg.selected||[];
+      const incoming=dedupeTicketRows(cfg.selected||[]);
       const oldKeys=(settings.selected||[]).map(w=>w.key).sort().join('\n');
       const newKeys=incoming.map(w=>w.key).sort().join('\n');
       const keepVerified=!!settings.verified && oldKeys===newKeys && !!newKeys;
@@ -1018,7 +1090,10 @@
   }
   async function saveSharedSelection(){
     if(!link)throw Error('\u8acb\u5148\u914d\u5c0d\u3002');
-    readSettingsUI();validateSelection(settings);
+    readSettingsUI();
+    settings.selected=dedupeTicketRows(settings.selected);
+    selected=new Set(settings.selected.map(r=>r.key));
+    validateSelection(settings);
     const cfg=await relay('configure',{selected:settings.selected,verified:settings.verified});
     applyShared(cfg,false);await saveSettings();notice('\u7968\u7a2e\u5df2\u5132\u5b58\u5230\u540c\u4e00\u7b46\u76e3\u63a7\uff0c\u5176\u4ed6\u88dd\u7f6e\u53ef\u6309\u540c\u6b65\u3002');
   }
@@ -1062,7 +1137,7 @@
   $('exclude').onchange=()=>{
     settings.exclude=$('exclude').checked; settings.verified=false; $('verified').checked=false; renderRows();
   };
-  $('verified').onchange=()=>{ settings.verified=$('verified').checked; adapter.setValue(SETTING_PREFIX+settingURL,{...settings,selected:rows.filter(r=>selected.has(r.key)).map(serialRow)}).catch(()=>{}); notice($('verified').checked ? `已確認目前選擇：${selected.size} 個票種。` : '已取消票種核對。'); };
+  $('verified').onchange=()=>{ settings.verified=$('verified').checked; adapter.setValue(SETTING_PREFIX+settingURL,{...settings,selected:selectedRowsForSave()}).catch(()=>{}); notice($('verified').checked ? `已確認目前選擇：${selected.size} 個票種。` : '已取消票種核對。'); };
 
   action('connectLink',async()=>{
     if(runtime.running)throw Error('\u8acb\u5148\u505c\u6b62\u76e3\u63a7\u3002');
@@ -1086,7 +1161,7 @@
   });
   action('clearSelection',async()=>{
     if (runtime.running) await halt('已停止監控，準備修改票種。');
-    selected.clear(); settings.verified=false; $('verified').checked=false; renderRows(); await saveSelectionDraft();
+    selected.clear(); settings.selected=[]; settings.verified=false; $('verified').checked=false; renderRows(); await saveSelectionDraft();
     notice('已清除所有票種選擇。');
   });
   action('start',start);
