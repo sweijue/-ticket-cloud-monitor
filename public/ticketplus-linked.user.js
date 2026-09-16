@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ticket Plus Linked Monitor
 // @namespace    local.ticket-monitor.se2
-// @version      1.1.2
+// @version      1.2.0
 // @description  Ticket Plus 單場前景監控：選票種、排除身障票、重整後繼續、ntfy 提醒。不代購、不匯出登入資訊。
 // @match        https://ticketplus.com.tw/*
 // @match        https://www.ticketplus.com.tw/*
@@ -29,7 +29,7 @@
 (() => {
   'use strict';
   if (window.top !== window.self) return;
-  const VERSION = '1.1.2';
+  const VERSION = '1.2.0';
 
   const rawGM = typeof GM === 'undefined' ? {} : GM;
   const adapter = {
@@ -242,36 +242,38 @@
       .line{display:flex;gap:7px;align-items:center;margin:8px 0}.line>*{flex:1}.line input[type=checkbox]{flex:none}.top{justify-content:space-between}.top strong{font-size:16px}
       .primary{background:#11656c;color:#fff;border-color:#11656c}.danger{background:#ad3636;color:#fff;border-color:#ad3636}
       .small{font-size:12px;color:#516476}.warn{font-size:12px;color:#8b4e10}.ticket{padding:8px;border:1px solid #dde5ec;border-radius:9px;margin:6px 0;display:flex;gap:8px;align-items:flex-start}
-      .ticket span{overflow-wrap:anywhere}.ticket b{font-size:14px}.ticket small{display:block;color:#516476}.ticket:has(input:disabled){opacity:.6}
+      .ticket span{overflow-wrap:anywhere}.ticket.selected{border-color:#0c8276;background:#effcf8}.ticket b{font-size:14px}.ticket small{display:block;color:#516476}.ticket:has(input:disabled){opacity:.6}
       .ok{color:#14745d}.bad{color:#a33b32}#notice{white-space:pre-wrap;overflow-wrap:anywhere;font-size:13px}
       summary{cursor:pointer;padding:8px 0}#picker{border:2px solid #0c8276;padding:8px;background:#effcf8;border-radius:8px}
     </style>
-    <button id="toggle">監票</button>
+    <button type="button" id="toggle">監票</button>
     <section id="panel">
-      <div class="line top"><strong>Ticket Plus 電腦 / SE2 監控</strong><button id="collapse">收合</button></div>
-      <div class="small">1.1.2 · Windows 修正版 · 本機執行</div>
+      <div class="line top"><strong>Ticket Plus 電腦 / SE2 監控</strong><button type="button" id="collapse">收合</button></div>
+      <div class="small">1.2.0 · 多選票種修正版 · 本機執行</div>
       <p id="status">正在啟動…</p>
-      <p id="notice"></p>
+      <p id="notice"></p><p id="debugAction" class="small">最後操作：尚未操作</p>
       <details id="linkDetails"><summary>連到原本的管理頁（電腦 / SE2 共用）</summary>
       <p id="linkState" class="small">未配對；單機設定不會自動同步。</p>
       <label>這台裝置名稱<input id="deviceName" maxlength="40" placeholder="Windows 或 SE2"></label>
       <label>貼上管理頁產生的配對碼<input id="pairInput" type="password" autocomplete="off" placeholder="tcm1...."></label>
-      <div class="line"><button id="connectLink">配對</button><button id="pullLink">同步共用設定</button></div>
-      <button id="saveLocalSelection">儲存票種到管理頁</button>
-      <button id="unlink">取消這台裝置配對</button>
+      <div class="line"><button type="button" id="connectLink">配對</button><button type="button" id="pullLink">同步共用設定</button></div>
+      <button type="button" id="saveLocalSelection">儲存票種到管理頁</button>
+      <button type="button" id="unlink">取消這台裝置配對</button>
       <p class="small">配對後，名稱、頻率、時段、Topic 由管理頁統一設定。售票網站登入狀態留在這台裝置，不會上傳。</p></details>
 
-      <div class="line"><button id="scan">讀取票種</button><button id="pick">點選票種</button></div>
+      <div class="line"><button type="button" id="scan">讀取票種</button><button type="button" id="pick">點選票種</button></div>
       <div id="picker" hidden>
         <div id="pickText">面板會收起，請點網頁上的一個票種。</div>
-        <div class="line"><button id="pickAdd">加入這個票種</button><button id="pickCancel">取消</button></div>
+        <div class="line"><button type="button" id="pickAdd">加入這個票種</button><button type="button" id="pickCancel">取消</button></div>
       </div>
       <label><input id="exclude" type="checkbox" checked> 排除身障／輪椅／陪同票</label>
-      <div id="tickets"><p class="small">先按「讀取票種」，再核對名稱和狀態。</p></div>
+      <div id="selectionSummary" style="padding:8px;background:#f4f7fa;border-radius:8px;margin:8px 0">已選 0 個票種</div>
+      <div class="line"><button type="button" id="selectAll">全選一般票種</button><button type="button" id="clearSelection">全部清除</button></div>
+      <div id="tickets"><p class="small">先按「讀取票種」，再用勾選框一次選擇一個或多個票種。</p></div>
       <label><input id="verified" type="checkbox"> 我已核對票種名稱和狀態與網頁相符</label>
       <label>通知名稱<input id="name" maxlength="80" placeholder="例如：遠大演唱會"></label>
       <label>ntfy Topic<input id="topic" type="password" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="填原本手機訂閱的 Topic"></label>
-      <div class="line"><label><input id="showTopic" type="checkbox"> 顯示 Topic</label><button id="testPush">測試通知</button></div>
+      <div class="line"><label><input id="showTopic" type="checkbox"> 顯示 Topic</label><button type="button" id="testPush">測試通知</button></div>
       <details><summary>刷新時間與進階設定</summary>
         <label>刷新模式<select id="mode"><option value="random">隨機間隔</option><option value="fixed">固定間隔</option></select></label>
         <div class="line" id="randomFields"><label>最短秒數<input id="min" type="number" min="1" max="3600" value="1"></label><label>最長秒數<input id="max" type="number" min="1" max="3600" value="5"></label></div>
@@ -282,8 +284,8 @@
         <label><input id="sound" type="checkbox"> 嘗試 本機提示音（重整後可能無聲）</label>
         <p class="warn">間隔在頁面載入、讀取完成後才開始計時，實際週期更長。1～5 秒可能觸發網站限制，不是防封鎖模式。</p>
       </details>
-      <div class="line"><button id="start" class="primary">開始監控</button><button id="stop" class="danger">停止</button></div>
-      <button id="retry" hidden>重送未成功的通知</button>
+      <div class="line"><button type="button" id="start" class="primary">開始監控</button><button type="button" id="stop" class="danger">停止</button></div>
+      <button type="button" id="retry" hidden>重送未成功的通知</button>
       <div class="small">只讀畫面，不選位、不加張數、不下單。找到有票會先停止刷新。請讓這個瀏覽器分頁保持前景。</div>
     </section>`;
   const $ = id => shadow.getElementById(id);
@@ -348,13 +350,24 @@
     await adapter.setValue(SETTING_PREFIX + settingURL, settings);
     await adapter.setValue('se2TicketMonitor.defaultTopic', settings.topic);
   }
+  function renderSelectionSummary() {
+    const chosen = rows.filter(r => selected.has(r.key));
+    const box = $('selectionSummary');
+    if (!box) return;
+    if (!chosen.length) {
+      box.textContent = '已選 0 個票種';
+      return;
+    }
+    box.textContent = `已選 ${chosen.length} 個：${chosen.map(r => `${r.label} $${Number(r.price||0).toLocaleString()}`).join('、')}`;
+  }
+
   function renderRows() {
     const list = $('tickets');
     list.replaceChildren();
     if (!rows.length) {
       const p = document.createElement('p'); p.className = 'small';
       p.textContent = '尚未辨識到票種。可等網頁載入後再讀取，或按「點選票種」。';
-      list.appendChild(p); return;
+      list.appendChild(p); renderSelectionSummary(); return;
     }
     for (const row of rows) {
       const label = document.createElement('label'); label.className='ticket';
@@ -364,13 +377,23 @@
       if (settings.exclude && row.accessible) { box.checked=false; selected.delete(row.key); }
       box.addEventListener('change', () => {
         if (box.checked) selected.add(row.key); else selected.delete(row.key);
+        label.classList.toggle('selected', box.checked);
         settings.verified=false; $('verified').checked=false;
+        renderSelectionSummary();
+        notice(box.checked ? `已加入：${row.label}。目前共選 ${selected.size} 個。` : `已取消：${row.label}。目前共選 ${selected.size} 個。`);
+        $('debugAction').textContent=`最後操作：${box.checked?'勾選':'取消'} ${row.label}`;
       });
       const span = document.createElement('span'), b = document.createElement('b'), small = document.createElement('small');
       b.textContent = `${row.label} · $${row.price.toLocaleString()}`;
       small.textContent = `${stateLabel(row.state)}${row.accessible ? ' · 特殊席' : ''}｜${row.reason || ''}`;
-      span.append(b, small); label.append(box,span); list.appendChild(label);
+      span.append(b, small); label.append(box,span); label.classList.toggle('selected', box.checked); list.appendChild(label);
     }
+    renderSelectionSummary();
+  }
+  function validateSelection(s) {
+    if (!isOrder()) throw Error('請在登入後的 Ticket Plus /order/ 單場票種頁使用。');
+    if (!s.selected.length) throw Error('請先讀取票種，再勾選至少一個一般票種。');
+    if (!s.verified) throw Error('請勾選「我已核對票種名稱和狀態」。');
   }
   function validate(s) {
     if (!isOrder()) throw Error('請在登入後的 Ticket Plus /order/ 單場票種頁使用，不是活動首頁。');
@@ -378,8 +401,7 @@
     for (const k of [s.mode === 'fixed' ? 'fixed' : 'min', ...(s.mode === 'random' ? ['max'] : [])])
       if (!Number.isInteger(s[k]) || s[k]<1 || s[k]>3600) throw Error('秒數請填 1～3600 的整數。');
     if (s.mode==='random' && s.min>s.max) throw Error('最短秒數不能大於最長秒數。');
-    if (!s.selected.length) throw Error('請先讀取並勾選至少一個一般票種。');
-    if (!s.verified) throw Error('請核對讀到的票種名稱和狀態，再勾選「我已核對」。');
+    validateSelection(s);
     if (s.scheduled && (!Number.isFinite(Date.parse(s.startAt)) || !Number.isFinite(Date.parse(s.endAt)) ||
       Date.parse(s.endAt)<=Math.max(Date.parse(s.startAt),clock()))) throw Error('請填有效的開始、結束日期時間，且結束必須晚於現在和開始。');
   }
@@ -557,10 +579,10 @@
     if (!isOrder()) throw Error('請先在 Ticket Plus 打開單場 /order/ 票種頁。');
     rows=detectRows();
     const old=new Set(settings.selected.map(r=>r.key));
-    selected=new Set(rows.filter(r=>(old.size?old.has(r.key):true) && !(settings.exclude&&r.accessible)).map(r=>r.key));
+    selected=new Set(rows.filter(r=>old.size && old.has(r.key) && !(settings.exclude&&r.accessible)).map(r=>r.key));
     settings.verified=false; $('verified').checked=false;
     renderRows();
-    notice(rows.length?`讀到 ${rows.length} 個候選票種。請核對網頁：只勾選你要的票種；「無法確認」不是售完。`:'未辨識到完整票種。請試「點選票種」，不用輸入監控文字。');
+    notice(rows.length?`讀到 ${rows.length} 個候選票種。請用勾選框選一個或多個票種；上方會即時顯示已選項目。`:'未辨識到完整票種。請試「點選票種」，不用輸入監控文字。');
   }
   async function start() {
     notice('正在啟動監控…');
@@ -638,7 +660,7 @@
   }
   async function saveSharedSelection(){
     if(!link)throw Error('\u8acb\u5148\u914d\u5c0d\u3002');
-    readSettingsUI();validate(settings);
+    readSettingsUI();validateSelection(settings);
     const cfg=await relay('configure',{selected:settings.selected,verified:settings.verified});
     applyShared(cfg,false);await saveSettings();notice('\u7968\u7a2e\u5df2\u5132\u5b58\u5230\u540c\u4e00\u7b46\u76e3\u63a7\uff0c\u5176\u4ed6\u88dd\u7f6e\u53ef\u6309\u540c\u6b65\u3002');
   }
@@ -651,6 +673,7 @@
 
   const action=(id,fn)=>$(id).addEventListener('click',async()=>{
     const btn=$(id), oldText=btn.textContent;
+    $('debugAction').textContent=`最後操作：${oldText}（${new Date().toLocaleTimeString()}）`;
     btn.disabled=true;
     if(id==='start') btn.textContent='啟動中…';
     if(id==='scan') btn.textContent='讀取中…';
@@ -673,6 +696,7 @@
   $('exclude').onchange=()=>{
     settings.exclude=$('exclude').checked; settings.verified=false; $('verified').checked=false; renderRows();
   };
+  $('verified').onchange=()=>{ notice($('verified').checked ? `已確認目前選擇：${selected.size} 個票種。` : '已取消票種核對。'); };
 
   action('connectLink',async()=>{
     if(runtime.running)throw Error('\u8acb\u5148\u505c\u6b62\u76e3\u63a7\u3002');
@@ -684,10 +708,21 @@
     try{const cfg=await relay('sync');await adapter.setValue('tcm.link.'+settingURL,link);$('pairInput').value='';applyShared(cfg,true);await adapter.setValue(SETTING_PREFIX+settingURL,settings);notice('\u914d\u5c0d\u5b8c\u6210\u3002\u8acb\u8b80\u53d6\u7968\u7a2e\u3001\u6838\u5c0d\u5f8c\u5132\u5b58\u3002');}catch(e){link=previous;throw e;}
   });
   action('pullLink',async()=>{if(runtime.running)throw Error('\u8acb\u5148\u505c\u6b62\u3002');await pullShared();});
-  action('saveLocalSelection',async()=>{notice('正在儲存票種…'); await saveSharedSelection();});
+  action('saveLocalSelection',async()=>{notice(`正在儲存 ${selected.size} 個票種…`); await saveSharedSelection();});
   action('unlink',async()=>{await halt('\u5df2\u53d6\u6d88\u672c\u6a5f\u914d\u5c0d\u3002');await adapter.setValue('tcm.link.'+settingURL,null);link=null;remoteConfig=null;renderStatus();});
 
   action('scan',async()=>{notice('正在讀取票種…'); setStatus('正在讀取票種…'); renderStatus(); await ensureProfile(); await scan();});
+  action('selectAll',async()=>{
+    if (runtime.running) await halt('已停止監控，準備修改票種。');
+    selected = new Set(rows.filter(r => !(settings.exclude && r.accessible)).map(r => r.key));
+    settings.verified=false; $('verified').checked=false; renderRows();
+    notice(`已選 ${selected.size} 個一般票種。請核對後勾選「我已核對」。`);
+  });
+  action('clearSelection',async()=>{
+    if (runtime.running) await halt('已停止監控，準備修改票種。');
+    selected.clear(); settings.verified=false; $('verified').checked=false; renderRows();
+    notice('已清除所有票種選擇。');
+  });
   action('start',start);
   action('stop',async()=>{unpick();await halt('已手動停止。');});
   action('retry',sendPending);
@@ -713,7 +748,7 @@
     if (!rows.some(r=>r.key===row.key)) rows.push(row);
     if (!(settings.exclude&&row.accessible)) selected.add(row.key);
     unpick();panel(true);settings.verified=false;$('verified').checked=false;renderRows();
-    notice('已加入這個票種。請核對狀態再開始。');
+    notice(`已加入這個票種。現在共選 ${selected.size} 個；可繼續按「點選票種」加入更多。`);
   });
   action('pickCancel',async()=>{unpick();panel(true);renderStatus();});
   document.addEventListener('click',event=>{
