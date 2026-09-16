@@ -1,6 +1,12 @@
 const $ = s => document.querySelector(s);
 const monitorsEl = $('#monitors');
 let editingId = null;
+let tpStages = [];
+let tpTickets = [];
+let tpSelectedStage = null;
+let txStages = [];
+let txTickets = [];
+let txSelectedStage = null;
 const busyActions = new Set();
 
 function formData(){
@@ -11,7 +17,12 @@ function formData(){
     minSeconds:+$('#minSeconds').value, maxSeconds:+$('#maxSeconds').value,
     limitedTime: $('#limitedTime').checked, startTime:$('#startTime').value, endTime:$('#endTime').value,
     detectionMode: $('#detectionMode').value, watchText: $('#watchText').value, watchCondition:$('#watchCondition').value,
-    ntfyTopic: $('#ntfyTopic').value.trim()
+    ntfyTopic: $('#ntfyTopic').value.trim(),
+    ticketplusStage: tpSelectedStage,
+    ticketplusTicketKeys: [...document.querySelectorAll('input[name="tpTicket"]:checked')].map(x=>x.value),
+    excludeAccessible: $('#excludeAccessible')?.checked ?? true,
+    tixcraftStage: txSelectedStage,
+    tixcraftTicketKeys: [...document.querySelectorAll('input[name="txTicket"]:checked')].map(x=>x.value)
   };
 }
 
@@ -22,6 +33,9 @@ function fillForm(m){
   $('#fixedSeconds').value=m.fixedSeconds||5; $('#minSeconds').value=m.minSeconds||1; $('#maxSeconds').value=m.maxSeconds||5;
   $('#limitedTime').checked=!!m.limitedTime; $('#startTime').value=m.startTime||'11:55'; $('#endTime').value=m.endTime||'12:30';
   $('#detectionMode').value=m.detectionMode||'auto'; $('#watchText').value=m.watchText||'已售完'; $('#watchCondition').value=m.watchCondition||'disappears'; $('#ntfyTopic').value=m.ntfyTopic||''; updateCustomRule();
+  tpSelectedStage=m.ticketplusStage||null; tpStages=tpSelectedStage?[tpSelectedStage]:[]; tpTickets=(m.ticketplusTicketKeys||[]).map(k=>({key:k,name:k,state:'saved'}));
+  txSelectedStage=m.tixcraftStage||null; txStages=txSelectedStage?[txSelectedStage]:[]; txTickets=(m.tixcraftTicketKeys||[]).map(k=>({key:k,name:k,state:'saved'}));
+  if($('#excludeAccessible')) $('#excludeAccessible').checked=m.excludeAccessible!==false; updateTicketplusPanel(); updateTixcraftPanel(); renderTpStages(); renderTpTickets(m.ticketplusTicketKeys||[]); renderTxStages(); renderTxTickets(m.tixcraftTicketKeys||[]);
   $('#save').textContent='更新監控'; $('#cancelEdit').hidden=false;
   window.scrollTo({top:0,behavior:'smooth'});
 }
@@ -31,6 +45,7 @@ function resetForm(){
   document.querySelector('input[name="intervalMode"][value="random"]').checked=true;
   $('#fixedSeconds').value=5; $('#minSeconds').value=1; $('#maxSeconds').value=5;
   $('#detectionMode').value='auto'; updateCustomRule(); $('#save').textContent='新增監控'; $('#cancelEdit').hidden=true;
+  tpStages=[];tpTickets=[];tpSelectedStage=null;txStages=[];txTickets=[];txSelectedStage=null;if($('#excludeAccessible'))$('#excludeAccessible').checked=true;updateTicketplusPanel();updateTixcraftPanel();renderTpStages();renderTxStages();
 }
 
 async function api(url, opts={}){
@@ -40,11 +55,73 @@ async function api(url, opts={}){
   return j;
 }
 
-function siteName(t){return ({kham:'寬宏',kktix:'KKTIX',avex:'AVEX',tixcraft:'拓元',ibon:'ibon',generic:'通用'})[t]||t}
+function siteName(t){return ({kham:'寬宏',kktix:'KKTIX',avex:'AVEX',tixcraft:'拓元',ibon:'ibon',ticketplus:'Ticket Plus',generic:'通用'})[t]||t}
 function detectionName(m){
   if(m.siteType!=='generic') return '網站自動判斷';
   return ({auto:'自動判斷',soldout:'售完/缺貨解除',stock:'庫存/剩餘 > 0',custom:'自訂文字'})[m.detectionMode||'auto']||'自動判斷';
 }
+
+function isTicketplusUrl(v){try{return new URL(v).hostname.toLowerCase().includes('ticketplus.com.tw')}catch{return false}}
+function updateTicketplusPanel(){const box=$('#ticketplusSetup');if(!box)return;box.hidden=!isTicketplusUrl($('#url').value.trim())}
+function isTixcraftUrl(v){try{return new URL(v).hostname.toLowerCase().includes('tixcraft.com')}catch{return false}}
+function updateTixcraftPanel(){const box=$('#tixcraftSetup');if(!box)return;box.hidden=!isTixcraftUrl($('#url').value.trim())}
+$('#url')?.addEventListener('input',()=>{
+  const url=$('#url').value.trim();updateTicketplusPanel();updateTixcraftPanel();
+  if(!isTicketplusUrl(url)){tpStages=[];tpTickets=[];tpSelectedStage=null;renderTpStages();}
+  if(!isTixcraftUrl(url)){txStages=[];txTickets=[];txSelectedStage=null;renderTxStages();}
+});
+function renderTpStages(){
+  const area=$('#tpStageArea'), btn=$('#tpLoadTickets'), tickets=$('#tpTicketArea'); if(!area)return;
+  if(!tpStages.length){area.innerHTML='貼上 Ticket Plus 活動網址後按「讀取場次」。'; if(btn)btn.hidden=true;if(tickets)tickets.innerHTML='';return}
+  area.innerHTML='<strong>選擇場次：</strong>'+tpStages.map((x,i)=>`<label class="row" style="align-items:flex-start"><input type="radio" name="tpStage" value="${i}" ${tpSelectedStage&&JSON.stringify(tpSelectedStage)===JSON.stringify(x)?'checked':''}/> <span>${escapeHtml(x.label||`場次 ${i+1}`)}</span></label>`).join('');
+  area.querySelectorAll('input[name="tpStage"]').forEach(r=>r.addEventListener('change',()=>{tpSelectedStage=tpStages[Number(r.value)];tpTickets=[];renderTpTickets();if(btn)btn.hidden=false}));
+  if(btn)btn.hidden=!tpSelectedStage;
+}
+function renderTpTickets(selectedKeys=[]){
+  const area=$('#tpTicketArea');if(!area)return;
+  if(!tpTickets.length){area.innerHTML='';return}
+  const selected=new Set(selectedKeys);
+  area.innerHTML='<strong>票種（可多選；全不選＝全部一般票）：</strong>'+tpTickets.map((t,i)=>`<label class="row" style="align-items:flex-start"><input type="checkbox" name="tpTicket" value="${escapeHtml(t.key)}" ${selected.has(t.key)?'checked':''}/> <span>${t.accessible?'♿ ':''}${escapeHtml(t.name||t.price||`票種 ${i+1}`)} <small>〔${escapeHtml(t.state||'unknown')}〕</small></span></label>`).join('');
+}
+$('#tpLoadStages')?.addEventListener('click',async()=>{
+  const url=$('#url').value.trim(); if(!isTicketplusUrl(url))return alert('請先貼 Ticket Plus 活動網址');
+  const b=$('#tpLoadStages');b.disabled=true;b.textContent='讀取中…';
+  try{const j=await api('/api/ticketplus/stages',{method:'POST',body:JSON.stringify({url})});tpStages=j.stages||[];tpSelectedStage=null;tpTickets=[];renderTpStages();if(!tpStages.length)alert('目前沒有抓到可選場次，可能活動尚未開放或頁面結構需要再調整。');}
+  catch(e){alert(e.message)}finally{b.disabled=false;b.textContent='讀取場次'}
+});
+$('#tpLoadTickets')?.addEventListener('click',async()=>{
+  if(!tpSelectedStage)return alert('請先選場次');const b=$('#tpLoadTickets');b.disabled=true;b.textContent='讀取中…';
+  try{const j=await api('/api/ticketplus/tickets',{method:'POST',body:JSON.stringify({url:$('#url').value.trim(),stage:tpSelectedStage})});tpTickets=j.tickets||[];renderTpTickets();if(!tpTickets.length)alert('場次已開啟，但目前沒有辨識到票種。可能尚未開賣，或需要再調整 Ticket Plus 規則。');}
+  catch(e){alert(e.message)}finally{b.disabled=false;b.textContent='讀取這個場次的票種'}
+});
+
+
+
+function renderTxStages(){
+  const area=$('#txStageArea'), btn=$('#txLoadTickets'), tickets=$('#txTicketArea'); if(!area)return;
+  if(!txStages.length){area.innerHTML='貼上拓元活動網址後按「讀取場次」。'; if(btn)btn.hidden=true;if(tickets)tickets.innerHTML='';return}
+  area.innerHTML='<strong>選擇場次：</strong>'+txStages.map((x,i)=>`<label class="row" style="align-items:flex-start"><input type="radio" name="txStage" value="${i}" ${txSelectedStage&&JSON.stringify(txSelectedStage)===JSON.stringify(x)?'checked':''}/> <span>${escapeHtml(x.label||`場次 ${i+1}`)}</span></label>`).join('');
+  area.querySelectorAll('input[name="txStage"]').forEach(r=>r.addEventListener('change',()=>{txSelectedStage=txStages[Number(r.value)];txTickets=[];renderTxTickets();if(btn)btn.hidden=false}));
+  if(btn)btn.hidden=!txSelectedStage;
+}
+function renderTxTickets(selectedKeys=[]){
+  const area=$('#txTicketArea');if(!area)return;
+  if(!txTickets.length){area.innerHTML='';return}
+  const selected=new Set(selectedKeys);
+  area.innerHTML='<strong>票種／票區（可多選；全不選＝全部一般票）：</strong>'+txTickets.map((t,i)=>`<label class="row" style="align-items:flex-start"><input type="checkbox" name="txTicket" value="${escapeHtml(t.key)}" ${selected.has(t.key)?'checked':''}/> <span>${t.accessible?'♿ ':''}${escapeHtml(t.name||t.price||`票種 ${i+1}`)} <small>〔${escapeHtml(t.state||'unknown')}〕</small></span></label>`).join('');
+}
+$('#txLoadStages')?.addEventListener('click',async()=>{
+  const url=$('#url').value.trim(); if(!isTixcraftUrl(url))return alert('請先貼拓元活動網址');
+  const b=$('#txLoadStages');b.disabled=true;b.textContent='讀取中…';
+  try{const j=await api('/api/tixcraft/stages',{method:'POST',body:JSON.stringify({url})});txStages=j.stages||[];txSelectedStage=null;txTickets=[];renderTxStages();if(!txStages.length)alert('目前沒有抓到可選場次，可能活動尚未開放或頁面結構需要再調整。');}
+  catch(e){alert(e.message)}finally{b.disabled=false;b.textContent='讀取場次'}
+});
+$('#txLoadTickets')?.addEventListener('click',async()=>{
+  if(!txSelectedStage)return alert('請先選場次');const b=$('#txLoadTickets');b.disabled=true;b.textContent='讀取中…';
+  try{const j=await api('/api/tixcraft/tickets',{method:'POST',body:JSON.stringify({url:$('#url').value.trim(),stage:txSelectedStage})});txTickets=j.tickets||[];renderTxTickets();if(!txTickets.length)alert('場次已開啟，但目前沒有辨識到票種／票區。可能尚未開賣、需要登入，或拓元頁面結構需要再調整。');}
+  catch(e){alert(e.message)}finally{b.disabled=false;b.textContent='讀取這個場次的票種'}
+});
+
 function updateCustomRule(){ $('#customRule').hidden = $('#detectionMode').value !== 'custom'; }
 $('#detectionMode').addEventListener('change', updateCustomRule);
 updateCustomRule();
@@ -66,6 +143,8 @@ function render(ms){
       <span>網址</span><strong>${escapeHtml(m.url)}</strong>
       <span>頻率</span><strong>${m.intervalMode==='fixed'?`每 ${m.fixedSeconds} 秒`:`隨機 ${m.minSeconds}～${m.maxSeconds} 秒`}</strong>
       <span>判斷</span><strong>${detectionName(m)}</strong>
+      ${m.siteType==='ticketplus'?`<span>場次</span><strong>${escapeHtml(m.ticketplusStage?.label||'未選擇')}</strong><span>票種</span><strong>${m.ticketplusTicketKeys?.length?`${m.ticketplusTicketKeys.length} 個指定票種`:'全部一般票種'}${m.excludeAccessible!==false?'（排除身障票）':''}</strong>`:''}
+      ${m.siteType==='tixcraft'?`<span>場次</span><strong>${escapeHtml(m.tixcraftStage?.label||'未選擇')}</strong><span>票種</span><strong>${m.tixcraftTicketKeys?.length?`${m.tixcraftTicketKeys.length} 個指定票種`:'全部一般票種'}${m.excludeAccessible!==false?'（排除身障票）':''}</strong>`:''}
       <span>最後檢查</span><strong>${m.lastCheck||'—'}</strong>
       <span>下次檢查</span><strong class="next" data-id="${m.id}">${nextText(m)}</strong>
       <span>結果</span><strong>${escapeHtml(m.lastResult||'—')}</strong>
@@ -163,4 +242,4 @@ monitorsEl.addEventListener('click',async e=>{
 setInterval(()=>{document.querySelectorAll('.next').forEach(el=>{const m=cache.find(x=>x.id===el.dataset.id);if(m)el.textContent=nextText(m)})},1000);
 setInterval(load,5000);
 load();
-api('/api/info').then(info=>{const el=$('#buildVersion');if(el)el.textContent=`V3.1 KKTIX 診斷版 | 後端 ${info.version}`}).catch(()=>{const el=$('#buildVersion');if(el)el.textContent='前端 V3.1；請確認 server.js 也已更新'});
+api('/api/info').then(info=>{const el=$('#buildVersion');if(el)el.textContent=`V3.3 Ticket Plus + 拓元 場次/票種版 | 後端 ${info.version}`}).catch(()=>{const el=$('#buildVersion');if(el)el.textContent='前端 V3.3；請確認 server.js 也已更新'});

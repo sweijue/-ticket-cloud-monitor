@@ -20,9 +20,9 @@
 <body>
 <main class="wrap">
   <h1>🎫 售票雲端監控</h1>
-  <p class="hint">貼網址即可。寬宏、KKTIX、AVEX、拓元、ibon 會依網站規則判斷；其他網站預設自動抓「售完/缺貨、庫存/剩餘、可購買狀態」。只監控與通知，不會自動購票。</p>
+  <p class="hint">貼網址即可。寬宏、KKTIX、AVEX、拓元、ibon、Ticket Plus 會依網站規則判斷；其他網站預設自動抓「售完/缺貨、庫存/剩餘、可購買狀態」。只監控與通知，不會自動購票。</p>
 
-  <p id="buildVersion" class="hint">V3.1 KKTIX 診斷版</p>
+  <p id="buildVersion" class="hint">V3.3 Ticket Plus + 拓元 場次/票種版</p>
   <section class="card">
     <h2>新增監控</h2>
     <label>名稱</label>
@@ -31,6 +31,23 @@
     <input id="url" type="url" placeholder="https://..." />
     <p class="inline-note">KKTIX 需先通過「測試抓取」；出現 403、驗證或無法辨識票種時會暫停。</p>
     <p class="inline-note">系統會依網址自動選擇快速抓取或雲端瀏覽器模式。</p>
+    <div id="ticketplusSetup" hidden style="margin-top:16px;padding-top:14px;border-top:1px solid #ddd">
+      <h3>Ticket Plus 場次與票種</h3>
+      <button type="button" id="tpLoadStages" class="secondary">讀取場次</button>
+      <div id="tpStageArea" class="hint" style="margin-top:10px">貼上 Ticket Plus 活動網址後按「讀取場次」。</div>
+      <button type="button" id="tpLoadTickets" class="secondary" hidden style="margin-top:10px">讀取這個場次的票種</button>
+      <div id="tpTicketArea" style="margin-top:10px"></div>
+      <p class="hint">一筆監控先選一個場次；如果要同時監控另一場，再新增一筆即可。票種可多選；不勾票種時會監控該場次所有一般票種。</p>
+    </div>
+    <div id="tixcraftSetup" hidden style="margin-top:16px;padding-top:14px;border-top:1px solid #ddd">
+      <h3>拓元場次與票種</h3>
+      <button type="button" id="txLoadStages" class="secondary">讀取場次</button>
+      <div id="txStageArea" class="hint" style="margin-top:10px">貼上拓元活動網址後按「讀取場次」。</div>
+      <button type="button" id="txLoadTickets" class="secondary" hidden style="margin-top:10px">讀取這個場次的票種</button>
+      <div id="txTicketArea" style="margin-top:10px"></div>
+      <p class="hint">沿用下方「排除身障／輪椅票」設定。一筆監控先選一個場次；票種可多選，不勾票種則監控全部一般票種。</p>
+    </div>
+    <label class="row" style="margin-top:14px"><input id="excludeAccessible" type="checkbox" checked /> 排除身障／身心障礙／輪椅／陪同席</label>
   </section>
 
   <section class="card">
@@ -55,7 +72,7 @@
       <option value="stock">庫存／剩餘數量 &gt; 0</option>
       <option value="custom">自訂文字</option>
     </select>
-    <p class="hint">寬宏、AVEX、KKTIX、拓元、ibon 仍優先使用各網站專用規則。其他網站選「自動判斷」時，會先找庫存/剩餘數字，再看售完/缺貨狀態與可購買按鈕。</p>
+    <p class="hint">寬宏、AVEX、KKTIX、拓元、ibon、Ticket Plus 仍優先使用各網站專用規則。其他網站選「自動判斷」時，會先找庫存/剩餘數字，再看售完/缺貨狀態與可購買按鈕。</p>
     <div id="customRule" hidden>
       <label>監控文字</label><input id="watchText" value="已售完" />
       <label>通知條件</label>
@@ -80,6 +97,6 @@
   <div class="diag-head"><h2>KKTIX 抓取診斷</h2><button id="closeDiagnostic" class="secondary">關閉</button></div>
   <div id="diagnosticContent"></div>
 </dialog>
-<script src="/app.js?v=3.1.0-kktix-diagnostics"></script>
+<script src="/app.js?v=3.3.0-ticketplus-tixcraft"></script>
 </body>
 </html>
