@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ticket Plus Linked Monitor
 // @namespace    local.ticket-monitor.se2
-// @version      1.1.0
+// @version      1.1.1
 // @description  Ticket Plus 單場前景監控：選票種、排除身障票、重整後繼續、ntfy 提醒。不代購、不匯出登入資訊。
 // @match        https://ticketplus.com.tw/*
 // @match        https://www.ticketplus.com.tw/*
@@ -33,14 +33,26 @@
 (() => {
   'use strict';
   if (window.top !== window.self) return;
-  const VERSION = '1.1.0';
+  const VERSION = '1.1.1';
 
   const rawGM = typeof GM === 'undefined' ? {} : GM;
   const adapter = {
     getValue: (k,d) => typeof rawGM.getValue==='function' ? rawGM.getValue(k,d) : Promise.resolve(GM_getValue(k,d)),
     setValue: (k,v) => typeof rawGM.setValue==='function' ? rawGM.setValue(k,v) : Promise.resolve(GM_setValue(k,v)),
-    getTab: () => typeof GM_getTab==='function' ? new Promise(resolve=>GM_getTab(resolve)) : rawGM.getTab(),
-    saveTab: t => typeof GM_saveTab==='function' ? new Promise(resolve=>GM_saveTab(t,resolve)) : rawGM.saveTab(t),
+    getTab: () => typeof rawGM.getTab==='function' ? rawGM.getTab() : new Promise(resolve=>GM_getTab(resolve)),
+    saveTab: t => {
+      if (typeof rawGM.saveTab==='function') return rawGM.saveTab(t);
+      return new Promise((resolve,reject)=>{
+        let done=false;
+        const finish=()=>{ if(done)return; done=true; resolve(); };
+        try {
+          GM_saveTab(t, finish);
+          // Some Tampermonkey builds do not invoke the optional callback reliably.
+          // Saving is synchronous from the userscript point of view, so don't let Start hang forever.
+          setTimeout(finish, 250);
+        } catch(e) { reject(e); }
+      });
+    },
     xmlHttpRequest: d => typeof rawGM.xmlHttpRequest==='function' ? rawGM.xmlHttpRequest(d) : GM_xmlhttpRequest(d)
   };
   const LINK_ORIGIN='https://ticket-cloud-monitor-production.up.railway.app';
@@ -255,7 +267,7 @@
     <button id="toggle">監票</button>
     <section id="panel">
       <div class="line top"><strong>Ticket Plus 電腦 / SE2 監控</strong><button id="collapse">收合</button></div>
-      <div class="small">1.1.0 · 本機執行 · 只監控目前單場</div>
+      <div class="small">1.1.1 · 本機執行 · 只監控目前單場</div>
       <p id="status">正在啟動…</p>
       <p id="notice"></p>
       <details id="linkDetails"><summary>連到原本的管理頁（電腦 / SE2 共用）</summary>
@@ -569,6 +581,9 @@
     notice(rows.length?`讀到 ${rows.length} 個候選票種。請核對網頁：只勾選你要的票種；「無法確認」不是售完。`:'未辨識到完整票種。請試「點選票種」，不用輸入監控文字。');
   }
   async function start() {
+    notice('正在啟動監控…');
+    setStatus('正在啟動監控…');
+    renderStatus();
     await ensureProfile();
     if (runtime.running) return;
     readSettingsUI(); validate(settings);
@@ -653,8 +668,19 @@
   }
 
   const action=(id,fn)=>$(id).addEventListener('click',async()=>{
-    $(id).disabled=true;
-    try { await fn(); } catch(e) { notice(e.message || String(e)); } finally { $(id).disabled=false; }
+    const btn=$(id), oldText=btn.textContent;
+    btn.disabled=true;
+    if(id==='start') btn.textContent='啟動中…';
+    try { await fn(); } catch(e) {
+      const msg=e?.message || String(e);
+      notice('無法執行：'+msg);
+      setStatus('未啟動：'+msg);
+      renderStatus();
+      if(id==='start') alert('開始監控失敗：'+msg);
+    } finally {
+      btn.textContent=oldText;
+      if(!runtime.running || id!=='start') btn.disabled=false;
+    }
   });
   $('toggle').onclick=()=>panel($('panel').hidden);
   $('collapse').onclick=()=>panel(false);
