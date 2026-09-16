@@ -1,13 +1,13 @@
 // ==UserScript==
 // @name         Ticket Plus Linked Monitor
 // @namespace    local.ticket-monitor.se2
-// @version      1.4.2
+// @version      1.5.0
 // @description  Ticket Plus 單場前景監控：選票種、排除身障票、重整後繼續、ntfy 提醒。不代購、不匯出登入資訊。
 // @match        https://ticketplus.com.tw/*
 // @match        https://www.ticketplus.com.tw/*
+// @match        https://*.ticketplus.com.tw/*
 // @run-at       document-end
 // @inject-into  content
-// @noframes
 // @grant        GM.getValue
 // @grant        GM.setValue
 // @grant        GM.xmlHttpRequest
@@ -28,8 +28,107 @@
  */
 (() => {
   'use strict';
-  if (window.top !== window.self) return;
-  const VERSION = '1.4.2';
+  const VERSION = '1.5.0';
+
+  // Ticket Plus may render the ticket picker inside an iframe. The previous
+  // implementation only listened in the top document (frame execution disabled + early return),
+  // so clicks inside that frame could never reach manual multi-select.
+  function setupFrameBridge() {
+    let framePickMode = false;
+    const clean = v => String(v || '').replace(/\s+/g, ' ').trim();
+    const visibleLocal = el => {
+      if (!el || el.nodeType !== 1) return false;
+      const st = getComputedStyle(el), r = el.getBoundingClientRect();
+      return st.display !== 'none' && st.visibility !== 'hidden' && r.width > 0 && r.height > 0;
+    };
+    const priceLocal = s => {
+      const nums = [...clean(s).matchAll(/(?:NT\$|TWD|\$)?\s*([1-9]\d{2,5})(?:\s*元)?/gi)]
+        .map(m => Number(m[1].replace(/,/g,''))).filter(n => n >= 100 && n <= 100000);
+      return nums[0] || 0;
+    };
+    const selectorLocal = el => {
+      const seg=[];
+      for (let n=0; el && el.nodeType===1 && n<14; n++, el=el.parentElement) {
+        if (el.id) { seg.unshift('#'+CSS.escape(el.id)); break; }
+        const tag=el.tagName.toLowerCase();
+        if (tag==='body'||tag==='html') { seg.unshift(tag); break; }
+        const sib=el.parentElement?[...el.parentElement.children].filter(x=>x.tagName===el.tagName):[el];
+        seg.unshift(`${tag}:nth-of-type(${sib.indexOf(el)+1})`);
+      }
+      return seg.join(' > ');
+    };
+    const pickInfo = seed => {
+      const first = seed?.nodeType===1 ? seed : seed?.parentElement;
+      if (!first || !visibleLocal(first)) return null;
+      const path=[]; let el=first;
+      for (let i=0; el && i<10 && !el.matches('html'); i++,el=el.parentElement) {
+        if (visibleLocal(el)) path.push(el);
+        if (el.matches('body')) break;
+      }
+      if (!path.length) return null;
+      let chosen = path.find((el,i)=>{
+        const t=clean(`${el.getAttribute?.('aria-label')||''} ${el.getAttribute?.('title')||''} ${el.innerText||el.textContent||''}`);
+        return t && ((i<=2 && t.length<=280) || (/售完|sold|票|區|price|ticket|area/i.test(t) && t.length<=600));
+      }) || path[0];
+      const raw=clean(`${chosen.getAttribute?.('aria-label')||''} ${chosen.getAttribute?.('title')||''} ${chosen.innerText||chosen.textContent||''}`);
+      if (!raw) return null;
+      const price=priceLocal(raw);
+      let label=raw.replace(/(?:NT\$|TWD|\$)?\s*[1-9]\d{2,5}(?:\s*元)?/gi,' ').replace(/\s+/g,' ').trim();
+      if (!label) label = price ? `票價 ${price.toLocaleString()}` : raw.slice(0,100);
+      label=label.slice(0,180);
+      const sold=/售完|sold\s*out|已售罄|無票|0\s*張/i.test(raw);
+      const accessible=/身障|身心障礙|輪椅|陪同|愛心席|accessible|wheelchair/i.test(raw);
+      return {label,price,accessible,state:sold?'sold':'unknown',reason:sold?'畫面顯示售完':'手動選取',selector:selectorLocal(chosen),frameUrl:location.href,preview:raw.slice(0,500)};
+    };
+    const snapshotOne = saved => {
+      if (!saved || !saved.selector) return null;
+      let el=null; try { el=document.querySelector(saved.selector); } catch(_) {}
+      if (!el && saved.label) {
+        const needle=clean(saved.label).toLowerCase();
+        el=[...document.querySelectorAll('label,li,tr,[role="row"],button,div,span,p')]
+          .find(x=>visibleLocal(x) && clean(x.innerText||x.textContent).toLowerCase().includes(needle)) || null;
+      }
+      if (!el) return {key:saved.key,state:'missing',reason:'iframe 內找不到原本選取項目'};
+      let scope=el; for(let i=0;i<5 && scope.parentElement;i++){
+        const t=clean(scope.innerText||scope.textContent);
+        if (/售完|sold\s*out|已售罄|無票|0\s*張/i.test(t)) return {key:saved.key,state:'sold',reason:'iframe 畫面顯示售完'};
+        const sel=scope.querySelector?.('select');
+        if (sel && [...sel.options].some(o=>!o.disabled && Number(o.value||o.textContent)>0)) return {key:saved.key,state:'available',reason:'iframe 數量選單有可選數量'};
+        const inp=scope.querySelector?.('input[type="number"]');
+        if (inp && !inp.disabled && Number(inp.max||0)>0) return {key:saved.key,state:'available',reason:'iframe 數量欄位可選'};
+        const plus=[...scope.querySelectorAll?.('button,[role="button"]')||[]].find(b=>!b.disabled && /\+|增加|plus/i.test(clean(b.getAttribute('aria-label')||b.textContent)));
+        if (plus) return {key:saved.key,state:'available',reason:'iframe 有可用增加數量控制'};
+        scope=scope.parentElement;
+      }
+      return {key:saved.key,state:'unknown',reason:'iframe 已找到票種，但目前沒有足夠可售證據'};
+    };
+    const broadcastChildren = msg => {
+      for (const f of document.querySelectorAll('iframe')) { try { f.contentWindow?.postMessage(msg,'*'); } catch(_) {} }
+    };
+    window.addEventListener('message', e=>{
+      const d=e.data;
+      if (!d || d.__tcmBridge!==1) return;
+      if (d.type==='pick-mode') { framePickMode=!!d.active; broadcastChildren(d); }
+      if (d.type==='snapshot-request') {
+        const here=String(location.href).split('#')[0];
+        const rows=(Array.isArray(d.items)?d.items:[]).filter(x=>!x.frameUrl || String(x.frameUrl).split('#')[0]===here).map(snapshotOne).filter(Boolean);
+        if (rows.length) window.top.postMessage({__tcmBridge:1,type:'snapshot-response',requestId:d.requestId,rows},'*');
+        broadcastChildren(d);
+      }
+    });
+    window.addEventListener('pointerdown', e=>{
+      if (!framePickMode) return;
+      const path=typeof e.composedPath==='function'?e.composedPath():[];
+      const target=path.find(n=>n?.nodeType===1) || e.target;
+      const item=pickInfo(target);
+      if (!item) return;
+      e.preventDefault(); e.stopImmediatePropagation();
+      window.top.postMessage({__tcmBridge:1,type:'ticket-pick',item},'*');
+    },true);
+    window.top.postMessage({__tcmBridge:1,type:'frame-ready',frameUrl:location.href},'*');
+  }
+
+  if (window.top !== window.self) { setupFrameBridge(); return; }
 
   const rawGM = typeof GM === 'undefined' ? {} : GM;
   const adapter = {
@@ -323,7 +422,7 @@
     const explicit = ['data-ticket-id','data-ticket-type-id','data-price-id','data-area-id']
       .map(a=>chosen.getAttribute?.(a) || target.getAttribute?.(a)).find(Boolean);
     const key = explicit ? `id:${explicit}|${price||'na'}` : `manual:${selector || targetSelector}|${price||'na'}|${label.toLowerCase().slice(0,80)}`;
-    return {key,label,price,state,reason,accessible:ACCESSIBLE.test(`${label} ${s}`),preview:s.slice(0,500),el:chosen,selector:selector || targetSelector};
+    return {key,label,price,state,reason,accessible:ACCESSIBLE.test(`${label} ${s}`),preview:s.slice(0,500),el:chosen,selector:selector || targetSelector,frameUrl:location.href};
   }
   function evidenceForSaved(saved) {
     let el = null;
@@ -347,7 +446,7 @@
     renderSelectionSummary();
   }
 
-  const serialRow = r => ({ key: r.key, label: r.label, price: r.price, accessible: r.accessible, selector:r.selector || selectorFor(r.el) });
+  const serialRow = r => ({ key: r.key, label: r.label, price: r.price, accessible: r.accessible, selector:r.selector || selectorFor(r.el), frameUrl:r.frameUrl || '' });
   const rowStamp = rows => JSON.stringify(rows.map(r => [r.key, r.state]).sort((a,b) => a[0].localeCompare(b[0])));
   const stateLabel = s => ({ available:'可選購', sold:'售完／0 張', not_started:'未開賣／已結束', unknown:'無法確認' }[s] || '無法確認');
 
@@ -376,7 +475,7 @@
     <button type="button" id="toggle">監票</button>
     <section id="panel">
       <div class="line top"><strong>Ticket Plus 電腦 / SE2 監控</strong><button type="button" id="collapse">收合</button></div>
-      <div class="small">${VERSION} · 手動選取不再拒絕版 · 本機執行</div>
+      <div class="small">${VERSION} · iframe / 多選修正版 · 本機執行</div>
       <div id="stateCard" class="stopped">
         <div class="line top"><strong id="runTitle">⏹ 已停止</strong><span id="runChecks" class="small">0 次</span></div>
         <p id="status">正在啟動…</p>
@@ -641,6 +740,9 @@
           if (candidate) { current.push(candidate); map.set(saved.key,candidate); }
         } catch (_) { /* Stale selector is not a ticket match. */ }
       }
+      // Frame-aware manual selection: selected ticket controls may live inside an iframe.
+      const frameEvidence=await requestFrameSnapshots(settings.selected.filter(w=>w.frameUrl && !map.has(w.key)));
+      for (const [k,v] of frameEvidence) if (!map.has(k)) map.set(k,{...(settings.selected.find(w=>w.key===k)||{}),...v});
       // Match by stable ticket name/price or a website-provided ID; never by list position.
       lastRows=settings.selected.map(w=>map.get(w.key) || {...w,state:'missing',reason:'這次頁面沒有找到原本勾選的票種'});
       const missing=lastRows.some(r=>r.state==='missing');
@@ -714,11 +816,72 @@
     renderStatus();
     try { await saveRuntime(); } catch(_) { notice('Userscripts 儲存失敗，請不要啟動刷新。'); }
   }
+  function broadcastPickMode(active) {
+    const msg={__tcmBridge:1,type:'pick-mode',active:!!active};
+    for (const f of document.querySelectorAll('iframe')) { try { f.contentWindow?.postMessage(msg,'*'); } catch(_) {} }
+  }
+  function normalizeFrameRow(item) {
+    if (!item) return null;
+    const label=norm(item.label || (item.price?`票價 ${Number(item.price).toLocaleString()}`:'手動票種'));
+    const price=Number(item.price)||0;
+    const frameUrl=String(item.frameUrl||'');
+    const selector=String(item.selector||'');
+    const key=`frame:${frameUrl}|${selector}|${price||'na'}|${label.toLowerCase().slice(0,80)}`;
+    return {key,label,price,state:item.state||'unknown',reason:item.reason||'手動選取',accessible:!!item.accessible,preview:String(item.preview||'').slice(0,500),el:null,selector,frameUrl};
+  }
+  async function toggleManualRow(row, source='頁面') {
+    if (!row) return;
+    $('debugAction').textContent=`最後操作：${source}選取「${row.label}」（${new Date().toLocaleTimeString()}）`;
+    if (!rows.some(r=>r.key===row.key)) rows.push(row);
+    if (settings.exclude && row.accessible) {
+      $('toggle').textContent='已排除身障／輪椅票';
+      setTimeout(()=>{ if(pickMode)$('toggle').textContent=`已選 ${selected.size} 個｜點我完成`; },1200);
+      return;
+    }
+    const removing=selected.has(row.key);
+    if (removing) {
+      selected.delete(row.key);
+      if (row.el && manualOutlines.has(row.el)) { row.el.style.outline=manualOutlines.get(row.el); manualOutlines.delete(row.el); }
+    } else {
+      selected.add(row.key);
+      if (row.el) { if (!manualOutlines.has(row.el)) manualOutlines.set(row.el,row.el.style.outline); row.el.style.outline='3px solid #0c8276'; }
+    }
+    settings.verified=false; $('verified').checked=false;
+    renderSelectionSummary();
+    saveSelectionDraft().catch(()=>{});
+    $('toggle').textContent=`已選 ${selected.size} 個｜點我完成`;
+    notice(`${removing?'已取消':'已加入'}：${row.label}${row.price ? ` · $${Number(row.price).toLocaleString()}` : ''}（目前 ${selected.size} 個）`);
+  }
+  const frameSnapshotWaiters=new Map();
+  window.addEventListener('message',e=>{
+    const d=e.data;
+    if(!d || d.__tcmBridge!==1) return;
+    if(d.type==='ticket-pick' && pickMode) {
+      const row=normalizeFrameRow(d.item);
+      toggleManualRow(row,'iframe').catch(handleError);
+      return;
+    }
+    if(d.type==='frame-ready' && pickMode) { try { e.source?.postMessage({__tcmBridge:1,type:'pick-mode',active:true},'*'); } catch(_) {} return; }
+    if(d.type==='snapshot-response' && d.requestId && frameSnapshotWaiters.has(d.requestId)) {
+      const rec=frameSnapshotWaiters.get(d.requestId); for(const r of (d.rows||[])) rec.rows.set(r.key,r);
+    }
+  });
+  async function requestFrameSnapshots(items) {
+    const wanted=(items||[]).filter(x=>x.frameUrl);
+    if(!wanted.length) return new Map();
+    const requestId=`snap-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const rec={rows:new Map()}; frameSnapshotWaiters.set(requestId,rec);
+    const msg={__tcmBridge:1,type:'snapshot-request',requestId,items:wanted};
+    for (const f of document.querySelectorAll('iframe')) { try { f.contentWindow?.postMessage(msg,'*'); } catch(_) {} }
+    await sleep(300);
+    frameSnapshotWaiters.delete(requestId);
+    return rec.rows;
+  }
   function unpick() {
     if (picked?.el) picked.el.style.outline=previousOutline;
     for (const [el, outline] of manualOutlines) { try { el.style.outline=outline; } catch(_) {} }
     manualOutlines.clear();
-    picked=null; pickMode=false; $('picker').hidden=true;
+    picked=null; pickMode=false; broadcastPickMode(false); $('picker').hidden=true;
     $('toggle').textContent = runtime.running ? '監票 · 執行中' : '監票 · 已停止';
   }
   async function scan() {
@@ -917,44 +1080,29 @@
     await ensureProfile();
     if (!isOrder()) throw Error('請先開啟單場票種頁。');
     if (runtime.running) await halt('已停止，準備手動選票種。');
-    unpick(); pickMode=true;
+    unpick(); pickMode=true; broadcastPickMode(true);
     $('picker').hidden=false;
-    $('pickText').textContent='已進入連續多選：直接點票種名稱、價格或票種區塊。即使價格不在同一列也能加入；完成後按左下角按鈕。';
-    notice('手動多選中：請直接點票種名稱、價格或票種區塊；不再要求同一列同時含價格。');
+    $('pickText').textContent='已進入連續多選：支援主頁與 iframe 內票種。每點一次都會加入／取消；完成後按左下角按鈕。';
+    const frameCount=document.querySelectorAll('iframe').length;
+    $('debugAction').textContent=`最後操作：手動多選已啟動（目前頁面有 ${frameCount} 個 iframe）`;
+    notice(`手動多選中：可直接點主頁或內嵌票種區塊；每點一次都會加入／取消並立即顯示數量。偵測到 ${frameCount} 個 iframe。`);
     panel(false); $('toggle').textContent=`已選 ${selected.size} 個｜點我完成`;
   });
   action('pickAdd',async()=>{ unpick(); panel(true); renderRows(); await saveSelectionDraft(); notice(`手動選擇完成，目前已選 ${selected.size} 個票種。`); });
   action('pickCancel',async()=>{unpick();panel(true);renderRows();renderStatus();});
-  document.addEventListener('click',event=>{
-    if (event.composedPath().includes(host)) return;
+  window.addEventListener('pointerdown',event=>{
+    const path=typeof event.composedPath==='function'?event.composedPath():[];
+    if (path.includes(host)) return;
     if (pickMode) {
       event.preventDefault(); event.stopImmediatePropagation();
-      const row=manualRowFromTarget(event.target);
+      const target=path.find(n=>n?.nodeType===1) || event.target;
+      const row=manualRowFromTarget(target);
       if (!row) {
         $('toggle').textContent=`這個位置沒有可用文字｜已選 ${selected.size} 個`;
         setTimeout(()=>{ if(pickMode)$('toggle').textContent=`已選 ${selected.size} 個｜點我完成`; },1200);
         return;
       }
-      if (!rows.some(r=>r.key===row.key)) rows.push(row);
-      const blocked=settings.exclude&&row.accessible;
-      if (blocked) {
-        $('toggle').textContent='已排除身障／輪椅票';
-        setTimeout(()=>{ if(pickMode)$('toggle').textContent=`已選 ${selected.size} 個｜點我完成`; },1200);
-        return;
-      }
-      if (selected.has(row.key)) {
-        selected.delete(row.key);
-        if (manualOutlines.has(row.el)) { row.el.style.outline=manualOutlines.get(row.el); manualOutlines.delete(row.el); }
-      } else {
-        selected.add(row.key);
-        if (!manualOutlines.has(row.el)) manualOutlines.set(row.el,row.el.style.outline);
-        row.el.style.outline='3px solid #0c8276';
-      }
-      settings.verified=false; $('verified').checked=false;
-      renderSelectionSummary();
-      saveSelectionDraft().catch(()=>{});
-      $('toggle').textContent=`已選 ${selected.size} 個｜點我完成`;
-      notice(`已加入：${row.label}${row.price ? ` · $${Number(row.price).toLocaleString()}` : ''}（目前 ${selected.size} 個）`);
+      toggleManualRow(row,'主頁').catch(handleError);
     } else if (runtime.running) {
       halt('你開始操作售票頁，已停止刷新。').catch(handleError);
     }
