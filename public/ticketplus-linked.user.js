@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ticket Plus Linked Monitor
 // @namespace    local.ticket-monitor.se2
-// @version      1.4.1
+// @version      1.4.2
 // @description  Ticket Plus 單場前景監控：選票種、排除身障票、重整後繼續、ntfy 提醒。不代購、不匯出登入資訊。
 // @match        https://ticketplus.com.tw/*
 // @match        https://www.ticketplus.com.tw/*
@@ -29,7 +29,7 @@
 (() => {
   'use strict';
   if (window.top !== window.self) return;
-  const VERSION = '1.4.1';
+  const VERSION = '1.4.2';
 
   const rawGM = typeof GM === 'undefined' ? {} : GM;
   const adapter = {
@@ -257,61 +257,73 @@
     return segments.join(' > ');
   }
   function manualRowFromTarget(seed) {
+    // Manual selection means the user has already told us "this is the thing I want".
+    // Do not reject the click just because Ticket Plus separates name/price/status into
+    // different DOM nodes. Capture a stable locator plus the nearest useful text.
     const target = seed?.nodeType === 1 ? seed : seed?.parentElement;
-    if (!target || target.closest(`#${HOST_ID}`)) return null;
-    const generic = /^(?:已售完|售完|完售|已售罄|售罄|數量|選擇數量|請選擇|加入|取消|下一步|立即購票|available|sold\s*out|\d[\d,]*(?:\s*元)?|(?:NT\s*\$|NTD|TWD|\$)\s*\d[\d,]*)$/i;
-    const seedText = norm(text(target));
+    if (!target || target.closest(`#${HOST_ID}`) || !visible(target)) return null;
 
-    function chooseLabel(el, price) {
-      const preferred = [...el.querySelectorAll('[data-ticket-name],.ticket-name,.ticket-title,[class*="ticketName"],[class*="ticket-name"],h2,h3,h4,h5,strong,b,label,span,p')]
-        .filter(x => visible(x))
-        .map(x => norm(text(x)))
-        .find(s => s.length >= 2 && s.length <= 180 && !generic.test(s) && !INSTRUCTIONS.test(s) && !prices(s).length);
-      let label = preferred || ((seedText.length >= 2 && seedText.length <= 180 && !generic.test(seedText) && !prices(seedText).length) ? seedText : '');
-      if (!label) {
-        const raw = norm(text(el));
-        const chunks = raw.split(/\s{2,}|[｜|]/).map(norm).filter(Boolean);
-        label = chunks.find(s => s.length >= 2 && s.length <= 180 && !generic.test(s) && !INSTRUCTIONS.test(s) && !prices(s).length) || '';
-      }
-      if (!label) label = cleanTicketLabel(text(el), price || 0);
-      return norm(label).slice(0,180);
-    }
+    const attrText = el => norm([
+      el?.getAttribute?.('aria-label'), el?.getAttribute?.('title'),
+      el?.getAttribute?.('data-name'), el?.getAttribute?.('data-title'),
+      el?.getAttribute?.('data-ticket-name')
+    ].filter(Boolean).join(' '));
 
-    let fallback = null;
-    let el = target;
-    for (let n=0; el && n<14 && !el.matches('body,html'); n++, el=el.parentElement) {
+    const chain=[];
+    let el=target;
+    for (let n=0; el && n<12 && !el.matches('html'); n++, el=el.parentElement) {
       if (el.closest(`#${HOST_ID}`)) return null;
-      const s = text(el);
-      if (!s || s.length > 2200 || INSTRUCTIONS.test(s)) continue;
-      const ps = prices(s);
-      const price = ps[0] || 0;
-      const label = chooseLabel(el, price);
-      if (!label || label.length < 2 || generic.test(label)) continue;
-
-      const controls=[...el.querySelectorAll(QTY_SELECTOR)].filter(visible);
-      const validSelect=controls.find(q=>q.tagName==='SELECT' && enabled(q) && [...q.options].some(o=>!o.disabled && /^\d+$/.test(String(o.value).trim()) && Number(o.value)>0));
-      const validInput=controls.find(q=>q.tagName!=='SELECT' && enabled(q) && (!q.hasAttribute('max') || Number(q.getAttribute('max'))>0));
-      const plus=plusControl(el), count=countEvidence(s);
-      let state='unknown', reason='已手動選取；等待頁面顯示可購買／售完證據';
-      if (SOLD.test(s) || count===0) { state='sold'; reason='票種區塊顯示售完或剩餘 0'; }
-      else if (FUTURE.test(s)) { state='not_started'; reason='尚未開賣、暫停或販售結束'; }
-      else if (validSelect || validInput || plus || count>0) { state='available'; reason='票種區塊有可操作數量或明示剩餘票'; }
-
-      const semantic = el.matches('tr,[role="row"],li,label,button,.v-list-item') || /ticket|price|area|product|order|item/i.test(String(el.className||''));
-      const hasEvidence = !!(price || controls.length || plus || SOLD.test(s) || FUTURE.test(s) || count !== null);
-      const selector = selectorFor(el);
-      const explicit = ['data-ticket-id','data-ticket-type-id','data-price-id','data-area-id'].map(a=>el.getAttribute?.(a)).find(Boolean);
-      const key = explicit ? `id:${explicit}|${price||'na'}` : `manual:${selector}|${price||'na'}|${label.toLowerCase().slice(0,80)}`;
-      const row = {key,label,price,state,reason,accessible:ACCESSIBLE.test(label),preview:s.slice(0,400),el,selector};
-      if (semantic || hasEvidence || n <= 3) return row;
-      fallback ||= row;
+      if (visible(el)) chain.push(el);
+      if (el.matches('body')) break;
     }
+    if (!chain.length) return null;
 
-    if (seedText.length >= 2 && seedText.length <= 180 && !generic.test(seedText) && !INSTRUCTIONS.test(seedText)) {
-      const selector=selectorFor(target);
-      return {key:`manual:${selector}|na|${seedText.toLowerCase().slice(0,80)}`,label:seedText,price:0,state:'unknown',reason:'已手動選取；此元件沒有同列價格，仍可監控狀態變化',accessible:ACCESSIBLE.test(seedText),preview:seedText,el:target,selector};
+    // Prefer a compact element near the click. We deliberately allow pure prices,
+    // "售完", numbers, and short labels in manual mode.
+    let chosen = chain.find((el,n) => {
+      const t=norm(`${attrText(el)} ${text(el)}`);
+      if (!t) return false;
+      if (n <= 2 && t.length <= 260) return true;
+      const hasTicketEvidence = prices(t).length || SOLD.test(t) || FUTURE.test(t) ||
+        el.querySelector?.(QTY_SELECTOR) || plusControl(el) || /ticket|price|area|product|item|order/i.test(String(el.className||''));
+      return hasTicketEvidence && t.length <= 800;
+    }) || chain.find(el => norm(`${attrText(el)} ${text(el)}`).length <= 900) || target;
+
+    const chosenText = norm(`${attrText(chosen)} ${text(chosen)}`);
+    const targetText = norm(`${attrText(target)} ${text(target)}`);
+    const ps = prices(chosenText);
+    const price = ps[0] || prices(targetText)[0] || 0;
+
+    let label='';
+    const useful = [targetText, ...chain.slice(0,5).map(x=>norm(`${attrText(x)} ${text(x)}`))]
+      .filter(Boolean);
+    for (const t of useful) {
+      if (t.length > 180) continue;
+      if (prices(t).length && t.replace(/(?:NT\s*\$|NTD|TWD|\$)?\s*\d[\d,]*\s*(?:元)?/gi,'').trim()==='') {
+        label = `票價 ${prices(t)[0].toLocaleString()}`;
+        break;
+      }
+      if (SOLD.test(t) && t.length <= 40) { label = `售完項目 ${selected.size+1}`; break; }
+      if (t.length >= 1) { label = cleanTicketLabel(t, price); if (label) break; }
     }
-    return fallback;
+    if (!label) label = price ? `票價 ${price.toLocaleString()}` : `手動票種 ${selected.size+1}`;
+
+    const s = chosenText || targetText || label;
+    const controls=[...chosen.querySelectorAll?.(QTY_SELECTOR) || []].filter(visible);
+    const validSelect=controls.find(q=>q.tagName==='SELECT' && enabled(q) && [...q.options].some(o=>!o.disabled && /^\d+$/.test(String(o.value).trim()) && Number(o.value)>0));
+    const validInput=controls.find(q=>q.tagName!=='SELECT' && enabled(q) && (!q.hasAttribute('max') || Number(q.getAttribute('max'))>0));
+    const plus=plusControl(chosen), count=countEvidence(s);
+    let state='unknown', reason='已手動指定這個項目；等待頁面顯示可購買／售完證據';
+    if (SOLD.test(s) || count===0) { state='sold'; reason='所選區塊顯示售完或剩餘 0'; }
+    else if (FUTURE.test(s)) { state='not_started'; reason='所選區塊顯示尚未開賣、暫停或販售結束'; }
+    else if (validSelect || validInput || plus || count>0) { state='available'; reason='所選區塊有可操作數量或明示剩餘票'; }
+
+    const selector = selectorFor(chosen);
+    const targetSelector = selectorFor(target);
+    const explicit = ['data-ticket-id','data-ticket-type-id','data-price-id','data-area-id']
+      .map(a=>chosen.getAttribute?.(a) || target.getAttribute?.(a)).find(Boolean);
+    const key = explicit ? `id:${explicit}|${price||'na'}` : `manual:${selector || targetSelector}|${price||'na'}|${label.toLowerCase().slice(0,80)}`;
+    return {key,label,price,state,reason,accessible:ACCESSIBLE.test(`${label} ${s}`),preview:s.slice(0,500),el:chosen,selector:selector || targetSelector};
   }
   function evidenceForSaved(saved) {
     let el = null;
@@ -364,7 +376,7 @@
     <button type="button" id="toggle">監票</button>
     <section id="panel">
       <div class="line top"><strong>Ticket Plus 電腦 / SE2 監控</strong><button type="button" id="collapse">收合</button></div>
-      <div class="small">1.4.0 · 狀態／票種同步修正版 · 本機執行</div>
+      <div class="small">${VERSION} · 手動選取不再拒絕版 · 本機執行</div>
       <div id="stateCard" class="stopped">
         <div class="line top"><strong id="runTitle">⏹ 已停止</strong><span id="runChecks" class="small">0 次</span></div>
         <p id="status">正在啟動…</p>
@@ -942,6 +954,7 @@
       renderSelectionSummary();
       saveSelectionDraft().catch(()=>{});
       $('toggle').textContent=`已選 ${selected.size} 個｜點我完成`;
+      notice(`已加入：${row.label}${row.price ? ` · $${Number(row.price).toLocaleString()}` : ''}（目前 ${selected.size} 個）`);
     } else if (runtime.running) {
       halt('你開始操作售票頁，已停止刷新。').catch(handleError);
     }
