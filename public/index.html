@@ -22,7 +22,7 @@
   <h1>🔔 網頁雲端監控</h1>
   <p class="hint">貼任何一般 HTTP(S) 網頁即可。預設用「智慧整頁變化」監控；已知售票網站仍可使用專用規則。Railway 雲端抓不到時，可自動切到已配對的 Windows / SE2 前景瀏覽器。只讀頁面與通知，不會自動購買或下單。</p>
 
-  <p id="buildVersion" class="hint">V4.0 通用網頁監控</p>
+  <p id="buildVersion" class="hint">V4.0.2 單一通用腳本</p>
   <section class="card">
     <h2>新增監控</h2>
     <label>名稱</label>
@@ -34,9 +34,9 @@
 
     <label for="execution">執行位置</label>
     <select id="execution"><option value="auto" selected>自動（建議：雲端 → 失敗時本機接手）</option><option value="cloud">僅雲端 Railway</option><option value="browser">僅本機瀏覽器（Windows / SE2）</option></select>
-    <p id="localHint" class="hint" hidden>先儲存後按「配對本機」，在目標網頁安裝／開啟「通用本機監控腳本」完成一次配對。自動模式平常仍由 Railway 執行；只有雲端讀不到時才要求本機接手。</p>
+    <p id="localHint" class="hint" hidden>先安裝一次「通用本機監控腳本」。新版管理頁偵測到腳本後，新增「自動／僅本機」監控會直接登記；若沒有自動登記，也可在該筆按「登記本機」。腳本只會在你已建立並登記的網址顯示，不會跑到其他網頁。自動模式平常仍由 Railway 執行；只有雲端讀不到時才要求本機接手。</p>
     <div id="ticketplusSetup" hidden style="margin-top:16px;padding-top:14px;border-top:1px solid #ddd">
-      <h3>Ticket Plus 場次與票種</h3>
+      <h3>Ticket Plus 加強辨識（選配，同一支通用腳本）</h3>
       <button type="button" id="tpDiagnoseOrder" class="secondary" hidden>診斷／讀取單場頁</button>
       <button type="button" id="tpLoadStages" class="secondary">讀取場次</button>
       <div id="tpStageArea" class="hint" style="margin-top:10px">貼上 Ticket Plus 活動網址後按「讀取場次」。</div>
@@ -45,7 +45,7 @@
       <p class="hint">一筆監控先選一個場次；如果要同時監控另一場，再新增一筆即可。票種可多選；不勾票種時會監控該場次所有一般票種。</p>
     </div>
     <div id="tixcraftSetup" hidden style="margin-top:16px;padding-top:14px;border-top:1px solid #ddd">
-      <h3>拓元場次與票種</h3>
+      <h3>拓元加強辨識（選配，同一支通用腳本）</h3>
       <button type="button" id="txLoadStages" class="secondary">讀取場次</button>
       <div id="txStageArea" class="hint" style="margin-top:10px">貼上拓元活動網址後按「讀取場次」。</div>
       <button type="button" id="txLoadTickets" class="secondary" hidden style="margin-top:10px">讀取這個場次的票種</button>
@@ -98,16 +98,16 @@
   <h2 class="section-title">目前監控</h2>
   <p id="loadStatus" role="status"></p>
   <div id="monitors"></div>
-<section class="card"><h2>本機執行工具</h2><p><strong>通用本機監控腳本</strong>可在一般網站使用，支援智慧整頁、指定區域與指定文字；同一支腳本可配對多個不同網站。</p><p><a href="/universal-linked.user.js">安裝／更新：通用本機監控腳本</a></p><details><summary>售票網站專用加強腳本（選配）</summary><p><a href="/ticketplus-linked.user.js">Ticket Plus 專用腳本</a></p><p><a href="/tixcraft-linked.user.js">拓元 Tixcraft 專用腳本</a></p></details><p class="hint">Windows 使用 Tampermonkey；SE2 使用 Userscripts。本機接手時需裝置開機、目標分頁保持前景。腳本只讀取頁面，不會自動購買、登入或繞過驗證。</p></section></main>
+<section class="card"><h2>本機執行工具</h2><p><strong>只需要安裝一支：通用本機監控腳本。</strong>遠大 Ticket Plus、拓元 Tixcraft、一般購物網站、庫存／價格／預約頁都共用這一支。已知網站的特殊辨識只是通用核心內的加強規則，不需要另外安裝專屬腳本。</p><p><a href="/universal-linked.user.js">安裝／更新：通用本機監控腳本 V4.0.2</a></p><p class="hint">這支腳本雖然具有跨網站權限，但<strong>未在管理頁建立並登記的網址完全不顯示面板、不啟動本機監控</strong>。Windows 使用 Tampermonkey；SE2 使用 Userscripts。本機接手時需裝置開機、目標分頁保持前景。</p></section></main>
 <dialog id="pairDialog" style="width:min(94vw,640px);border:1px solid #ccc;border-radius:16px;padding:24px">
-<h2>配對同一筆監控</h2><p>這串配對碼只能讀取、回報和控制這筆監控，不是售票帳密。請當成密碼保管，不要公開或貼在截圖。</p>
+<h2>登記這筆本機監控</h2><p id="pairAutoStatus">正在偵測通用腳本…</p><p>新版會從管理頁直接把這筆監控登記到通用腳本，不需要到每個網站貼配對碼。配對碼仍保留作備用，請勿公開。</p>
 <textarea id="pairCode" readonly style="width:100%;height:120px;word-break:break-all"></textarea>
-<div class="row"><button id="copyPair">複製配對碼</button><button id="closePair">關閉</button></div>
-<p>在電腦或 SE2 的目標網頁開啟「網頁監控」面板 → 貼上配對碼。第一次配對會自動以目前整頁建立基準；之後也可改成指定區域／文字。同一組配對碼可給兩台裝置；重新產生會使舊碼失效。</p></dialog>
+<div class="row"><a id="pairOpenTarget" class="button secondary" href="#" target="_blank" rel="noopener">開啟這個監控網頁</a><button id="copyPair">複製備用配對碼</button><button id="closePair">關閉</button></div>
+<p>正常情況只要看到上方「已自動登記」後，直接開啟監控網址即可。第一次開啟會自動以目前整頁建立基準；之後可改成指定區域／文字。若你刪除這筆監控，管理頁會同步清掉本機登記，之後該網址不再顯示監控面板。</p></dialog>
 <dialog id="diagnosticDialog">
   <div class="diag-head"><h2 id="diagnosticTitle">抓取診斷</h2><button id="closeDiagnostic" class="secondary">關閉</button></div>
   <div id="diagnosticContent"></div>
 </dialog>
-<script src="/app.js?v=4.0.0-universal"></script>
+<script src="/app.js?v=4.0.2-unified"></script>
 </body>
 </html>

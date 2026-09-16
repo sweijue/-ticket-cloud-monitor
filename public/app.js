@@ -8,6 +8,36 @@ let txStages = [];
 let txTickets = [];
 let txSelectedStage = null;
 const busyActions = new Set();
+const TCM_MANAGER_SOURCE='tcm-manager-page-v1';
+const TCM_SCRIPT_SOURCE='tcm-universal-userscript-v1';
+function postToUniversal(type,payload={},timeout=1200){
+  return new Promise(resolve=>{
+    const requestId=(crypto.randomUUID?.()||`${Date.now()}-${Math.random()}`);
+    let done=false;
+    const finish=v=>{if(done)return;done=true;window.removeEventListener('message',onMessage);clearTimeout(timer);resolve(v);};
+    const onMessage=e=>{
+      const d=e.data;if(e.source!==window||e.origin!==location.origin||!d||d.source!==TCM_SCRIPT_SOURCE||d.type!=='result'||d.requestId!==requestId)return;
+      finish(d);
+    };
+    window.addEventListener('message',onMessage);
+    const timer=setTimeout(()=>finish({ok:false,error:'universal_script_not_ready'}),timeout);
+    window.postMessage({source:TCM_MANAGER_SOURCE,type,requestId,...payload},location.origin);
+  });
+}
+function syncUniversalRegistry(ms){
+  const items=(ms||[]).filter(m=>['auto','browser'].includes(m.execution)).map(m=>({id:m.id,url:m.localUrl||m.url,execution:m.execution}));
+  window.postMessage({source:TCM_MANAGER_SOURCE,type:'sync-registry',requestId:`sync-${Date.now()}`,items},location.origin);
+}
+async function autoRegisterMonitor(m){
+  if(!m || !['auto','browser'].includes(m.execution) || m.localPaired) return false;
+  if(!document.getElementById('tcm-universal-manager-bridge')) return false;
+  try{
+    const j=await api(`/api/monitors/${m.id}/pair-local`,{method:'POST'});
+    const payload={v:1,origin:location.origin,id:j.monitorId,token:j.token,url:j.url};
+    const result=await postToUniversal('register',{payload},1400);
+    return result.ok===true;
+  }catch{return false;}
+}
 
 function formData(){
   const mode = document.querySelector('input[name="intervalMode"]:checked')?.value || 'random';
@@ -186,7 +216,7 @@ function render(ms){
       <button data-act="test" data-id="${m.id}" class="secondary" ${m.running||m.execution==='browser'?'disabled':''}>測試抓取</button>
       <button data-act="notify" data-id="${m.id}" class="secondary">測試通知</button>
       ${m.siteType==='kktix'?`<button data-act="diagnostic" data-id="${m.id}" class="secondary">檢視抓取畫面</button>`:''}
-      ${['auto','browser'].includes(m.execution)?`<button data-act="pair" data-id="${m.id}" class="secondary" ${m.running&&m.state!=='waiting_device'?'disabled':''}>配對本機</button>`:''}
+      ${['auto','browser'].includes(m.execution)?`<button data-act="pair" data-id="${m.id}" class="secondary" ${m.running&&m.state!=='waiting_device'?'disabled':''}>登記本機</button>`:''}
       <button data-act="edit" data-id="${m.id}" class="secondary">編輯</button>
       <button data-act="delete" data-id="${m.id}" class="secondary">刪除</button>
     </div>
@@ -202,7 +232,7 @@ async function load(){
   if(loading)return;
   loading=true;
   try{
-    cache=await api('/api/monitors');render(cache);
+    cache=await api('/api/monitors');render(cache);syncUniversalRegistry(cache);
     const status=$('#loadStatus');if(status)status.textContent='';
   }catch(error){
     const status=$('#loadStatus');if(status)status.textContent=`讀取清單失敗：${error.message}（不代表監控被刪除）`;
@@ -240,8 +270,10 @@ $('#save').addEventListener('click',async()=>{
   try{
     const data=formData();
     if(!data.url) return alert('請貼上監控網址');
-    if(editingId) await api(`/api/monitors/${editingId}`,{method:'PUT',body:JSON.stringify(data)});
-    else await api('/api/monitors',{method:'POST',body:JSON.stringify(data)});
+    const saved=editingId
+      ? await api(`/api/monitors/${editingId}`,{method:'PUT',body:JSON.stringify(data)})
+      : await api('/api/monitors',{method:'POST',body:JSON.stringify(data)});
+    await autoRegisterMonitor(saved);
     resetForm(); await load();
   }catch(e){alert(e.message)}
 });
@@ -274,7 +306,7 @@ monitorsEl.addEventListener('click',async e=>{
 setInterval(()=>{document.querySelectorAll('.next').forEach(el=>{const m=cache.find(x=>x.id===el.dataset.id);if(m)el.textContent=nextText(m)})},1000);
 setInterval(load,5000);
 load();
-api('/api/info').then(info=>{const el=$('#buildVersion');if(el)el.textContent=`V4.0 通用網頁監控 | 後端 ${info.version}`}).catch(()=>{const el=$('#buildVersion');if(el)el.textContent='前端 V4.0；請確認 server.js 也已更新'});
+api('/api/info').then(info=>{const el=$('#buildVersion');if(el)el.textContent=`V4.0.2 單一通用腳本 | 後端 ${info.version}`}).catch(()=>{const el=$('#buildVersion');if(el)el.textContent='前端 V4.0.2；請確認 server.js 也已更新'});
 
 function updateLocalMode(){
   const mode=$('#execution').value;
@@ -290,11 +322,17 @@ fillForm=function(m){originalFill(m);updateLocalMode();};
 const originalReset=resetForm;
 resetForm=function(){originalReset();$('#execution').value='auto';updateLocalMode();};
 async function showPair(m){
-  if(m.localPaired && !confirm('\u91cd\u65b0\u7522\u751f\u914d\u5c0d\u78bc\u6703\u4f7f\u6240\u6709\u88dd\u7f6e\u7684\u820a\u914d\u5c0d\u78bc\u5931\u6548\u3002\u78ba\u5b9a\uff1f'))return;
+  if(m.localPaired && !confirm('重新產生登記權杖會使這筆監控舊的本機登記失效。確定？'))return;
   const j=await api(`/api/monitors/${m.id}/pair-local`,{method:'POST'});
-  const raw=JSON.stringify({v:1,origin:location.origin,id:j.monitorId,token:j.token,url:j.url});
+  const payload={v:1,origin:location.origin,id:j.monitorId,token:j.token,url:j.url};
+  const raw=JSON.stringify(payload);
   const encoded=btoa(String.fromCharCode(...new TextEncoder().encode(raw))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
-  $('#pairCode').value='tcm1.'+encoded;$('#pairDialog').showModal();
+  $('#pairCode').value='tcm1.'+encoded;
+  const result=await postToUniversal('register',{payload},1400);
+  const st=$('#pairAutoStatus');
+  if(st) st.textContent=result.ok?'✅ 已自動登記到「通用本機監控腳本」。不需要再貼配對碼。':'⚠️ 沒有偵測到新版通用腳本。請先安裝／更新通用腳本；下方配對碼保留作備用。';
+  const a=$('#pairOpenTarget');if(a){a.href=j.url;a.textContent='開啟這個監控網頁';}
+  $('#pairDialog').showModal();
 }
 $('#closePair').onclick=()=>{$('#pairCode').value='';$('#pairDialog').close();};
 $('#copyPair').onclick=async()=>{try{await navigator.clipboard.writeText($('#pairCode').value);$('#copyPair').textContent='\u5df2\u8907\u88fd';}catch{$('#pairCode').select();}};
