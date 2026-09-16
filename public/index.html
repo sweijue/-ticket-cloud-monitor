@@ -22,7 +22,7 @@
   <h1>🔔 網頁雲端監控</h1>
   <p class="hint">貼任何一般 HTTP(S) 網頁即可。預設用「智慧整頁變化」監控；已知售票網站仍可使用專用規則。Railway 雲端抓不到時，可自動切到已配對的 Windows / SE2 前景瀏覽器。只讀頁面與通知，不會自動購買或下單。</p>
 
-  <p id="buildVersion" class="hint">V4.0.2 單一通用腳本</p>
+  <p id="buildVersion" class="hint">V4.0.3 單一通用腳本</p>
   <section class="card">
     <h2>新增監控</h2>
     <label>名稱</label>
@@ -98,7 +98,7 @@
   <h2 class="section-title">目前監控</h2>
   <p id="loadStatus" role="status"></p>
   <div id="monitors"></div>
-<section class="card"><h2>本機執行工具</h2><p><strong>只需要安裝一支：通用本機監控腳本。</strong>遠大 Ticket Plus、拓元 Tixcraft、一般購物網站、庫存／價格／預約頁都共用這一支。已知網站的特殊辨識只是通用核心內的加強規則，不需要另外安裝專屬腳本。</p><p><a href="/universal-linked.user.js">安裝／更新：通用本機監控腳本 V4.0.2</a></p><p class="hint">這支腳本雖然具有跨網站權限，但<strong>未在管理頁建立並登記的網址完全不顯示面板、不啟動本機監控</strong>。Windows 使用 Tampermonkey；SE2 使用 Userscripts。本機接手時需裝置開機、目標分頁保持前景。</p></section></main>
+<section class="card"><h2>本機執行工具</h2><p><strong>只需要安裝一支：通用本機監控腳本。</strong>遠大 Ticket Plus、拓元 Tixcraft、一般購物網站、庫存／價格／預約頁都共用這一支。已知網站的特殊辨識只是通用核心內的加強規則，不需要另外安裝專屬腳本。</p><p><a href="/universal-linked.user.js">安裝／更新：通用本機監控腳本 V4.0.3</a></p><p class="hint">這支腳本雖然具有跨網站權限，但<strong>未在管理頁建立並登記的網址完全不顯示面板、不啟動本機監控</strong>。Windows 使用 Tampermonkey；SE2 使用 Userscripts。本機接手時需裝置開機、目標分頁保持前景。</p></section></main>
 <dialog id="pairDialog" style="width:min(94vw,640px);border:1px solid #ccc;border-radius:16px;padding:24px">
 <h2>登記這筆本機監控</h2><p id="pairAutoStatus">正在偵測通用腳本…</p><p>新版會從管理頁直接把這筆監控登記到通用腳本，不需要到每個網站貼配對碼。配對碼仍保留作備用，請勿公開。</p>
 <textarea id="pairCode" readonly style="width:100%;height:120px;word-break:break-all"></textarea>
@@ -108,6 +108,6 @@
   <div class="diag-head"><h2 id="diagnosticTitle">抓取診斷</h2><button id="closeDiagnostic" class="secondary">關閉</button></div>
   <div id="diagnosticContent"></div>
 </dialog>
-<script src="/app.js?v=4.0.2-unified"></script>
+<script src="/app.js?v=4.0.3-scopefix"></script>
 </body>
 </html>

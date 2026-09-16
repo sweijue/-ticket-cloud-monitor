@@ -306,7 +306,7 @@ monitorsEl.addEventListener('click',async e=>{
 setInterval(()=>{document.querySelectorAll('.next').forEach(el=>{const m=cache.find(x=>x.id===el.dataset.id);if(m)el.textContent=nextText(m)})},1000);
 setInterval(load,5000);
 load();
-api('/api/info').then(info=>{const el=$('#buildVersion');if(el)el.textContent=`V4.0.2 單一通用腳本 | 後端 ${info.version}`}).catch(()=>{const el=$('#buildVersion');if(el)el.textContent='前端 V4.0.2；請確認 server.js 也已更新'});
+api('/api/info').then(info=>{const el=$('#buildVersion');if(el)el.textContent=`V4.0.3 單一通用腳本 | 後端 ${info.version}`}).catch(()=>{const el=$('#buildVersion');if(el)el.textContent='前端 V4.0.3；請確認 server.js 也已更新'});
 
 function updateLocalMode(){
   const mode=$('#execution').value;

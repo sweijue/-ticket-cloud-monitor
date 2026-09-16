@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Universal Linked Web Monitor
 // @namespace    local.ticket-monitor.universal
-// @version      4.0.2
+// @version      4.0.3
 // @description  單一通用網頁監控：只在管理頁已建立並登記的網址顯示；智慧整頁、指定區域、指定文字，自動雲端→本機接手。
 // @match        http://*/*
 // @match        https://*/*
@@ -17,7 +17,7 @@
 
 (() => {
   'use strict';
-  const VERSION = '4.0.2';
+  const VERSION = '4.0.3';
   const MANAGER_HOST = 'ticket-cloud-monitor-production.up.railway.app';
   const BRIDGE_ID = 'tcm-universal-manager-bridge';
   const ROOT_ID = 'tcm-universal-root';
@@ -137,7 +137,37 @@
     },true);
     sendTop({type:'frame-ready',frameUrl:canonical()});
   }
-  if(window.top!==window.self){setupFrameBridge();return;}
+  async function frameBridgeAllowed(){
+    // The userscript has broad @match permissions so future monitored sites do not need
+    // a reinstall. Iframes must still stay completely dormant unless their parent/top
+    // site belongs to an actually registered monitor. This prevents unrelated apps
+    // (for example Adobe Express) from getting bridge listeners or postMessage traffic.
+    if(!hasGM) return false;
+    let stored=[];
+    try{stored=await gm.getValue(LINKS_KEY,[]);}catch{return false;}
+    if(!Array.isArray(stored)||!stored.length) return false;
+    const registered=[];
+    for(const x of stored){
+      try{registered.push(new URL(x?.url));}catch{}
+    }
+    if(!registered.length) return false;
+    try{
+      const here=canonical();
+      if(registered.some(u=>canonical(u.toString())===here)) return true;
+    }catch{}
+    const ancestorOrigins=[];
+    try{
+      for(const o of Array.from(location.ancestorOrigins||[])) ancestorOrigins.push(String(o));
+    }catch{}
+    try{
+      if(document.referrer) ancestorOrigins.push(new URL(document.referrer).origin);
+    }catch{}
+    return registered.some(u=>ancestorOrigins.includes(u.origin));
+  }
+  if(window.top!==window.self){
+    frameBridgeAllowed().then(ok=>{if(ok) setupFrameBridge();}).catch(()=>{});
+    return;
+  }
   const randomId = () => {
     const a=new Uint8Array(18);crypto.getRandomValues(a);return [...a].map(x=>x.toString(16).padStart(2,'0')).join('');
   };
