@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ticket Plus Linked Monitor
 // @namespace    local.ticket-monitor.se2
-// @version      1.3.0
+// @version      1.3.1
 // @description  Ticket Plus 單場前景監控：選票種、排除身障票、重整後繼續、ntfy 提醒。不代購、不匯出登入資訊。
 // @match        https://ticketplus.com.tw/*
 // @match        https://www.ticketplus.com.tw/*
@@ -272,7 +272,7 @@
       button{border:1px solid #c4d0db;border-radius:9px;background:white;color:#15273c;padding:9px 11px;min-height:42px;cursor:pointer}
       button:disabled{opacity:.45;cursor:default}input:not([type=checkbox]),select{width:100%;border:1px solid #bac7d4;border-radius:8px;padding:9px;min-height:40px;font-size:16px;background:#fff;color:#142539}
       label{display:block;margin:8px 0 4px}input[type=checkbox]{width:18px;height:18px;vertical-align:middle;flex:none}
-      #toggle{position:fixed;bottom:12px;left:10px;z-index:2147483647;background:#14334d;color:white;box-shadow:0 3px 10px #0003}
+      #toggle{position:fixed;bottom:12px;left:10px;z-index:2147483647;background:#14334d;color:white;box-shadow:0 3px 10px #0003}#toggle.running{background:#087a55;border-color:#087a55}#toggle.stopped{background:#14334d}
       #panel{position:fixed;z-index:2147483647;bottom:64px;left:8px;width:calc(100vw - 16px);max-width:420px;max-height:70vh;overflow:auto;-webkit-overflow-scrolling:touch;border:1px solid #bac7d4;border-radius:14px;background:#fff;box-shadow:0 8px 35px #0004;padding:12px;padding-bottom:16px}
       #panel[hidden]{display:none}#status{padding:8px;background:#eef4f8;border-radius:8px;white-space:pre-wrap;overflow-wrap:anywhere}
       .line{display:flex;gap:7px;align-items:center;margin:8px 0}.line>*{flex:1}.line input[type=checkbox]{flex:none}.top{justify-content:space-between}.top strong{font-size:16px}
@@ -285,7 +285,7 @@
     <button type="button" id="toggle">監票</button>
     <section id="panel">
       <div class="line top"><strong>Ticket Plus 電腦 / SE2 監控</strong><button type="button" id="collapse">收合</button></div>
-      <div class="small">1.3.0 · 遠大票種辨識＋連續多選版 · 本機執行</div>
+      <div class="small">1.3.1 · 監控狀態顯示修正版 · 本機執行</div>
       <p id="status">正在啟動…</p>
       <p id="notice"></p><p id="debugAction" class="small">最後操作：尚未操作</p>
       <details id="linkDetails"><summary>連到原本的管理頁（電腦 / SE2 共用）</summary>
@@ -345,7 +345,12 @@
     const count = runtime.checks ? `\n已檢查 ${runtime.checks} 次` : '';
     const next = runtime.running && runtime.nextAt ? `\n下次刷新：約 ${Math.max(0, Math.ceil((runtime.nextAt-clock())/1000))} 秒後` : '';
     $('status').textContent = `${runtime.message || '待設定'}${count}${next}`;
-    $('toggle').textContent = runtime.running ? '監票 · 執行中' : '監票 · 已停止';
+    const seconds = runtime.running && runtime.nextAt ? Math.max(0, Math.ceil((runtime.nextAt-clock())/1000)) : null;
+    $('toggle').textContent = runtime.running ? `監票 · 執行中${seconds!==null ? ` · ${seconds}秒` : ''}` : '監票 · 已停止';
+    $('toggle').classList.toggle('running', !!runtime.running);
+    $('toggle').classList.toggle('stopped', !runtime.running);
+    $('start').textContent = runtime.running ? '監控中 ✓' : '開始監控';
+    $('stop').disabled = !runtime.running;
     $('retry').hidden = !runtime.pending || !!link;
     $('linkState').textContent=link ? '已配對：'+(remoteConfig?.name || settings.name)+'（同一筆監控）' : '未配對；單機設定不會自動同步。';
     $('start').disabled = !!runtime.running;
@@ -637,10 +642,10 @@
     let localRunId='';
     if(link){const gate=pageGate();if(gate)throw Error(gate);await saveSharedSelection();const cfg=await relay('begin');localRunId=cfg.runId;applyShared(cfg,false);}
     ++cycleToken; clearTimer();
-    runtime={localRunId,url:canonicalURL(),running:true,checks:0,message:'啟動監控…',nextAt:0,pending:null};
-    await saveRuntime(); await beep();
-    notice('偵測到可選購會直接通知，包括開始時就已經有票的情況。請勿在監控中操作購票按鈕。');
+    runtime={localRunId,url:canonicalURL(),running:true,checks:0,message:'監控中：正在確認票種狀態…',nextAt:0,pending:null};
     renderStatus(); renderRows();
+    notice('✅ 已開始監控。偵測到可選購會先停止刷新並通知；監控中請勿操作購票按鈕。');
+    await saveRuntime(); await beep();
     checkAndSchedule().catch(handleError);
   }
   async function ensureProfile() {
@@ -724,8 +729,13 @@
       renderStatus();
       if(id==='start') alert('開始監控失敗：'+msg);
     } finally {
-      btn.textContent=oldText;
+      if(id==='start') {
+        btn.textContent = runtime.running ? '監控中 ✓' : oldText;
+      } else {
+        btn.textContent=oldText;
+      }
       if(!runtime.running || id!=='start') btn.disabled=false;
+      renderStatus();
     }
   });
   $('toggle').onclick=()=>{
@@ -766,7 +776,7 @@
     notice('已清除所有票種選擇。');
   });
   action('start',start);
-  action('stop',async()=>{unpick();await halt('已手動停止。');});
+  action('stop',async()=>{unpick();setStatus('正在停止監控…');renderStatus();await halt('⏹ 已手動停止監控。');notice('已停止，不會再自動重新整理。');});
   action('retry',sendPending);
   action('testPush',async()=>{
     await ensureProfile(); if (runtime.running) await halt('已停止刷新，先測試通知。'); readSettingsUI();
@@ -845,7 +855,12 @@
       runtime={...runtime,...restored,nextAt:0};
       if (runtime.running) {
         if (!settings.selected.length || !settings.verified) await halt('缺少已確認票種設定，已停止。');
-        else {notice('已從這個瀏覽器分頁恢復監控。');checkAndSchedule().catch(handleError);}
+        else {
+          runtime.message='監控中：頁面已重新載入，正在確認票種…';
+          notice('✅ 監控仍在執行；這次重新整理是監控流程的一部分。');
+          renderStatus();
+          checkAndSchedule().catch(handleError);
+        }
       }
     } else if (restored?.running) {
       // Do not revive a monitor in a different page after login/checkout navigation.
