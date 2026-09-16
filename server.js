@@ -50,7 +50,7 @@ async function getBrowser() {
 }
 
 // KKTIX diagnostics v3.1: ordinary browser state only, no anti-bot bypass.
-const BUILD_VERSION = '3.1.0-kktix-diagnostics';
+const BUILD_VERSION = '3.3.0-ticketplus-tixcraft';
 const DIAGNOSTICS_DIR = path.join(DATA_DIR, 'diagnostics');
 const SESSION_DIR = path.join(DATA_DIR, 'browser-sessions');
 await fs.mkdir(DIAGNOSTICS_DIR, { recursive: true, mode: 0o700 });
@@ -339,6 +339,7 @@ function siteType(url) {
     if (host === 'kktix.com' || host.endsWith('.kktix.com') || host === 'kktix.cc' || host.endsWith('.kktix.cc')) return 'kktix';
     if (host.includes('shopping.avex.com.tw')) return 'avex';
     if (host.includes('tixcraft.com')) return 'tixcraft';
+    if (host.includes('ticketplus.com.tw')) return 'ticketplus';
     if (host.includes('ibon.com.tw') || host.includes('ticket.ibon.com.tw')) return 'ibon';
     return 'generic';
   } catch { return 'generic'; }
@@ -508,6 +509,248 @@ function parseGenericHtml(html, m) {
   return { site: 'generic', ...d };
 }
 
+
+
+function isAccessibleTicketText(text) {
+  return /身障|身心障礙|輪椅|愛心席|陪同席|accessible|wheelchair/i.test(String(text || ''));
+}
+
+async function ticketplusOpen(url, stage = null) {
+  const b = await getBrowser();
+  const page = await b.newPage({ locale: 'zh-TW', viewport: { width: 1280, height: 900 } });
+  page.setDefaultTimeout(8000);
+  try {
+    let response = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 25000 });
+    await page.waitForTimeout(1800);
+    let status = response?.status() || 200;
+    let body = cleanText(await page.locator('body').innerText().catch(() => ''));
+    if (blockedText(body, status)) throw monitorError('restricted', `網站回應 ${status} 或出現驗證/排隊/限制頁`);
+
+    if (stage) {
+      if (stage.href) {
+        response = await page.goto(stage.href, { waitUntil: 'domcontentloaded', timeout: 25000 });
+      } else if (Number.isInteger(Number(stage.index))) {
+        const buy = page.locator('a,button').filter({ hasText: /立即購票|立即購買|購票|Buy/i });
+        const n = await buy.count();
+        if (Number(stage.index) >= n) throw new Error('找不到原本選取的 Ticket Plus 場次，活動頁可能已改版。');
+        await Promise.allSettled([
+          page.waitForLoadState('domcontentloaded', { timeout: 12000 }),
+          buy.nth(Number(stage.index)).click({ timeout: 8000 })
+        ]);
+      }
+      await page.waitForTimeout(1800);
+      status = response?.status() || status;
+      body = cleanText(await page.locator('body').innerText().catch(() => ''));
+      if (blockedText(body, status)) throw monitorError('restricted', `網站回應 ${status} 或出現驗證/排隊/限制頁`);
+    }
+    return { page, status };
+  } catch (e) {
+    await page.close().catch(() => {});
+    throw e;
+  }
+}
+
+async function discoverTicketplusStages(url) {
+  const { page, status } = await ticketplusOpen(url);
+  try {
+    const stages = await page.evaluate(() => {
+      const norm = v => String(v || '').replace(/\s+/g, ' ').trim();
+      const visible = el => { const s=getComputedStyle(el), r=el.getBoundingClientRect(); return s.display!=='none'&&s.visibility!=='hidden'&&r.width>0&&r.height>0; };
+      const controls = [...document.querySelectorAll('a,button')].filter(el => visible(el) && /立即購票|立即購買|購票|Buy/i.test(norm(el.innerText || el.getAttribute('aria-label'))));
+      return controls.slice(0,80).map((el,index) => {
+        const box = el.closest('tr,li,[class*="session"],[class*="show"],[class*="event"],[class*="activity"],.row,.item') || el.parentElement;
+        const text = norm(box?.innerText || el.innerText).slice(0,400);
+        const anchor = el.tagName === 'A' ? el : el.closest('a');
+        const href = anchor?.href && /^https?:/i.test(anchor.href) ? anchor.href : '';
+        return { index, label: text || norm(el.innerText) || `場次 ${index+1}`, href };
+      });
+    });
+    const seen = new Set();
+    const unique = stages.filter(x => { const k=`${x.href}|${x.label}`; if(seen.has(k))return false; seen.add(k); return true; });
+    return { status, title: await page.title(), finalUrl: page.url(), stages: unique };
+  } finally { await page.close(); }
+}
+
+async function collectTicketplusTickets(page) {
+  return page.evaluate(() => {
+    const norm = v => String(v || '').replace(/\s+/g, ' ').trim();
+    const visible = el => { if(!el)return false; const s=getComputedStyle(el),r=el.getBoundingClientRect(); return s.display!=='none'&&s.visibility!=='hidden'&&r.width>0&&r.height>0; };
+    const enabled = el => visible(el) && !el.disabled && !el.matches(':disabled') && el.getAttribute('aria-disabled')!=='true' && !el.closest('.disabled,[aria-disabled="true"]');
+    const sold = /已售完|售完|售罄|完售|sold\s*out|無票|暫無票/i;
+    const future = /尚未開賣|尚未開始|未開賣|停止售票|已結束/i;
+    const roots = [...document.querySelectorAll('tr,li,[class*="ticket"],[class*="price"],[class*="zone"],[class*="area"],.row,.item')]
+      .filter(visible)
+      .filter(el => /(?:NT\$|TWD|NTD|\$)\s*[\d,]+|\b\d{3,6}\b\s*元|免費/.test(norm(el.innerText)))
+      .filter(el => !el.closest('header,footer,nav'));
+    const smallest = roots.filter(el => !roots.some(ch => ch!==el && el.contains(ch) && norm(ch.innerText).length>0));
+    return smallest.slice(0,150).map((el,idx) => {
+      const text=norm(el.innerText).slice(0,600);
+      const price=(text.match(/(?:NT\$|TWD|NTD|\$)\s*[\d,]+|\b\d{3,6}\b\s*元|免費/i)||[''])[0];
+      const selects=[...el.querySelectorAll('select')].filter(visible);
+      const inputs=[...el.querySelectorAll('input[type="number"],input[name*="qty" i],input[name*="quantity" i]')].filter(visible);
+      const buttons=[...el.querySelectorAll('button,a')].filter(enabled);
+      const quantity = selects.some(x => enabled(x) && [...x.options].some(o => !o.disabled && /^([1-9]\d*)$/.test(String(o.value).trim()))) ||
+        inputs.some(x => enabled(x) && (x.max==='' || Number(x.max)>0)) ||
+        buttons.some(x => /\+|選擇|購買|加入|下一步/i.test(norm(x.innerText || x.getAttribute('aria-label'))));
+      const isSold=sold.test(text), isFuture=future.test(text);
+      const accessible=/身障|身心障礙|輪椅|愛心席|陪同席|accessible|wheelchair/i.test(text);
+      const stableText=text.replace(/已售完|售完|售罄|完售|sold\s*out|無票|暫無票|尚未開賣|尚未開始|未開賣|停止售票|已結束/gi,'').replace(/\s+/g,' ').trim();
+      return { index:idx, key:`${price}|${accessible?'A':'N'}|${stableText.slice(0,140)}`, name:text.slice(0,180), price, accessible, available:!isSold&&!isFuture&&quantity, state:isSold?'sold_out':isFuture?'not_started':quantity?'available':'unknown', text };
+    });
+  });
+}
+
+async function discoverTicketplusTickets(url, stage) {
+  const { page, status } = await ticketplusOpen(url, stage);
+  try {
+    const tickets = await collectTicketplusTickets(page);
+    return { status, title: await page.title(), finalUrl: page.url(), tickets };
+  } finally { await page.close(); }
+}
+
+async function ticketplusSnapshot(m) {
+  if (!m.ticketplusStage) throw new Error('請先按「讀取場次」，選擇 Ticket Plus 場次後再開始監控。');
+  const { page } = await ticketplusOpen(m.url, m.ticketplusStage);
+  try {
+    const tickets = await collectTicketplusTickets(page);
+    const wantedKeys = new Set(Array.isArray(m.ticketplusTicketKeys) ? m.ticketplusTicketKeys : []);
+    let monitored = wantedKeys.size ? tickets.filter(t => wantedKeys.has(t.key)) : tickets;
+    if (m.excludeAccessible !== false) monitored = monitored.filter(t => !t.accessible);
+    const available = monitored.filter(t => t.available);
+    const summary = available.length
+      ? `發現可購買票種：${available.slice(0,6).map(t=>t.name).join('、')}`
+      : monitored.length ? `已檢查 ${monitored.length} 個票種，目前未發現可購買票種` : '未找到符合設定的票種，請重新讀取場次/票種。';
+    return { site:'ticketplus', available:available.length>0, summary, fingerprint: JSON.stringify(monitored.map(t=>[t.key,t.state])).slice(0,12000), finalUrl:page.url() };
+  } finally { await page.close(); }
+}
+
+
+
+function tixcraftGameUrl(url) {
+  try {
+    const u = new URL(url);
+    if (/\/activity\/detail\//.test(u.pathname)) u.pathname = u.pathname.replace('/activity/detail/', '/activity/game/');
+    return u.toString();
+  } catch { return url; }
+}
+
+async function tixcraftOpen(url, stage = null) {
+  const b = await getBrowser();
+  const page = await b.newPage({ locale: 'zh-TW', viewport: { width: 1280, height: 900 } });
+  page.setDefaultTimeout(9000);
+  try {
+    const gameUrl = tixcraftGameUrl(url);
+    let response = await page.goto(gameUrl, { waitUntil: 'domcontentloaded', timeout: 25000 });
+    await page.waitForTimeout(1500);
+    let status = response?.status() || 200;
+    let body = cleanText(await page.locator('body').innerText().catch(() => ''));
+    if (blockedText(body, status)) throw monitorError('restricted', `網站回應 ${status} 或出現驗證/排隊/限制頁`);
+
+    if (stage) {
+      if (stage.href) {
+        response = await page.goto(stage.href, { waitUntil: 'domcontentloaded', timeout: 25000 });
+      } else {
+        const rows = page.locator('tr').filter({ has: page.locator('button,a') });
+        const matching = rows.filter({ hasText: /Find tickets|立即訂購|立即購票|購票/i });
+        const n = await matching.count();
+        const idx = Number(stage.index);
+        if (!Number.isInteger(idx) || idx < 0 || idx >= n) throw new Error('找不到原本選取的拓元場次，活動頁可能已改版。');
+        const row = matching.nth(idx);
+        const control = row.locator('a,button,input[type="submit"],input[type="button"]').filter({ hasText: /Find tickets|立即訂購|立即購票|購票/i }).first();
+        await Promise.allSettled([
+          page.waitForLoadState('domcontentloaded', { timeout: 12000 }),
+          control.click({ timeout: 9000 })
+        ]);
+      }
+      await page.waitForTimeout(1600);
+      status = response?.status() || status;
+      body = cleanText(await page.locator('body').innerText().catch(() => ''));
+      if (blockedText(body, status)) throw monitorError('restricted', `網站回應 ${status} 或出現驗證/排隊/限制頁`);
+    }
+    return { page, status };
+  } catch (e) {
+    await page.close().catch(() => {});
+    throw e;
+  }
+}
+
+async function discoverTixcraftStages(url) {
+  const { page, status } = await tixcraftOpen(url);
+  try {
+    const stages = await page.evaluate(() => {
+      const norm = v => String(v || '').replace(/\s+/g, ' ').trim();
+      const visible = el => { const s=getComputedStyle(el), r=el.getBoundingClientRect(); return s.display!=='none'&&s.visibility!=='hidden'&&r.width>0&&r.height>0; };
+      const rows = [...document.querySelectorAll('tr')].filter(visible).filter(tr => /Find tickets|立即訂購|立即購票|購票/i.test(norm(tr.innerText)));
+      return rows.slice(0,100).map((row,index) => {
+        const text = norm(row.innerText).slice(0,500);
+        const control = [...row.querySelectorAll('a,button,input[type="submit"],input[type="button"]')].find(el => /Find tickets|立即訂購|立即購票|購票/i.test(norm(el.innerText || el.value || el.getAttribute('aria-label'))));
+        const anchor = control?.tagName === 'A' ? control : control?.closest('a');
+        let href = anchor?.href && /^https?:/i.test(anchor.href) ? anchor.href : '';
+        if (!href && control) {
+          const dataHref = control.getAttribute('data-href') || control.getAttribute('data-url') || control.getAttribute('formaction') || '';
+          if (dataHref) { try { href = new URL(dataHref, location.href).href; } catch {} }
+        }
+        const cells = [...row.querySelectorAll('td')].map(td => norm(td.innerText)).filter(Boolean);
+        const label = cells.length ? cells.slice(0,4).join(' | ') : text;
+        return { index, label: label || `場次 ${index+1}`, href };
+      });
+    });
+    return { status, title: await page.title(), finalUrl: page.url(), stages };
+  } finally { await page.close(); }
+}
+
+async function collectTixcraftTickets(page) {
+  return page.evaluate(() => {
+    const norm = v => String(v || '').replace(/\s+/g, ' ').trim();
+    const visible = el => { if(!el)return false; const s=getComputedStyle(el),r=el.getBoundingClientRect(); return s.display!=='none'&&s.visibility!=='hidden'&&r.width>0&&r.height>0; };
+    const enabled = el => visible(el) && !el.disabled && !el.matches(':disabled') && el.getAttribute('aria-disabled')!=='true' && !el.closest('.disabled,[aria-disabled="true"]');
+    const sold = /已售完|售完|售罄|完售|sold\s*out|無票|暫無票/i;
+    const future = /尚未開賣|尚未開始|未開賣|停止售票|已結束|sale not started/i;
+    const roots = [...document.querySelectorAll('tr,li,[class*="area"],[class*="zone"],[class*="ticket"],[class*="price"],.row,.item')]
+      .filter(visible).filter(el => !el.closest('header,footer,nav'))
+      .filter(el => /(?:NT\$|TWD|NTD|\$)\s*[\d,]+|\b\d{3,6}\b\s*元|免費|售完|sold\s*out/i.test(norm(el.innerText)));
+    const smallest = roots.filter(el => !roots.some(ch => ch!==el && el.contains(ch) && norm(ch.innerText).length>0));
+    return smallest.slice(0,220).map((el,idx) => {
+      const text = norm(el.innerText).slice(0,700);
+      const price = (text.match(/(?:NT\$|TWD|NTD|\$)\s*[\d,]+|\b\d{3,6}\b\s*元/i)||[''])[0];
+      const controls = [...el.querySelectorAll('a,button,input[type="radio"],input[type="checkbox"],select')].filter(visible);
+      const selectable = controls.some(x => enabled(x) && !/disabled|sold/i.test(String(x.className||'')));
+      const isSold = sold.test(text), isFuture = future.test(text);
+      const accessible = /身障|身心障礙|輪椅|愛心席|陪同席|accessible|wheelchair/i.test(text);
+      const name = text.slice(0,220);
+      const stableText = text.replace(/已售完|售完|售罄|完售|sold\s*out|無票|暫無票|尚未開賣|尚未開始|未開賣|停止售票|已結束/gi,'').replace(/\s+/g,' ').trim();
+      const key = `${price}|${accessible?'A':'N'}|${stableText.slice(0,150)}`;
+      return { index:idx, key, name, price, accessible, available:!isSold&&!isFuture&&selectable,
+        state:isSold?'sold_out':isFuture?'not_started':selectable?'available':'unknown', text };
+    }).filter(t => t.name && (t.price || /售完|sold\s*out/i.test(t.text)));
+  });
+}
+
+async function discoverTixcraftTickets(url, stage) {
+  const { page, status } = await tixcraftOpen(url, stage);
+  try {
+    const tickets = await collectTixcraftTickets(page);
+    return { status, title: await page.title(), finalUrl: page.url(), tickets };
+  } finally { await page.close(); }
+}
+
+async function tixcraftSnapshot(m) {
+  if (!m.tixcraftStage) throw new Error('請先按「讀取場次」，選擇拓元場次後再開始監控。');
+  const { page } = await tixcraftOpen(m.url, m.tixcraftStage);
+  try {
+    const tickets = await collectTixcraftTickets(page);
+    const wantedKeys = new Set(Array.isArray(m.tixcraftTicketKeys) ? m.tixcraftTicketKeys : []);
+    let monitored = wantedKeys.size ? tickets.filter(t => wantedKeys.has(t.key)) : tickets;
+    if (m.excludeAccessible !== false) monitored = monitored.filter(t => !t.accessible);
+    const available = monitored.filter(t => t.available);
+    const summary = available.length
+      ? `發現可購買票區：${available.slice(0,8).map(t=>t.name).join('、')}`
+      : monitored.length ? `已檢查 ${monitored.length} 個票區，目前未發現可購買票區` : '未找到符合設定的票區，請重新讀取場次/票種。';
+    return { site:'tixcraft', available:available.length>0, summary,
+      fingerprint:JSON.stringify(monitored.map(t=>[t.key,t.state])).slice(0,16000), finalUrl:page.url() };
+  } finally { await page.close(); }
+}
+
 async function browserSnapshot(url, m, type) {
   const b = await getBrowser();
   const page = await b.newPage({
@@ -579,7 +822,9 @@ async function inspectUnchecked(m, options = {}) {
   if (type === 'kham') return parseKham(await httpHtml(m.url));
   if (type === 'avex') return parseAvex(await httpHtml(m.url));
   if (type === 'kktix') return kktixSnapshot(m, options);
-  if (['tixcraft', 'ibon'].includes(type)) return browserSnapshot(m.url, m, type);
+  if (type === 'ticketplus') return ticketplusSnapshot(m);
+  if (type === 'tixcraft') return tixcraftSnapshot(m);
+  if (type === 'ibon') return browserSnapshot(m.url, m, type);
   try {
     return parseGenericHtml(await httpHtml(m.url), m);
   } catch (e) {
@@ -607,7 +852,8 @@ async function notify(m, result) {
       'Title': encodeURIComponent(title),
       'Priority': 'urgent',
       'Tags': 'ticket,rotating_light',
-      'Click': m.url,
+      'Click': siteType(m.url) === 'ticketplus' && m.ticketplusStage?.href ? m.ticketplusStage.href :
+        siteType(m.url) === 'tixcraft' && m.tixcraftStage?.href ? m.tixcraftStage.href : m.url,
       'Content-Type': 'text/plain; charset=utf-8'
     },
     body
@@ -716,6 +962,11 @@ function normalizeMonitor(input, existing = {}) {
     watchText: String(input.watchText || existing.watchText || '已售完'),
     watchCondition: input.watchCondition === 'appears' ? 'appears' : (input.watchCondition === 'disappears' ? 'disappears' : (existing.watchCondition || 'disappears')),
     ntfyTopic: String(input.ntfyTopic || existing.ntfyTopic || '').trim(),
+    ticketplusStage: input.ticketplusStage || existing.ticketplusStage || null,
+    ticketplusTicketKeys: Array.isArray(input.ticketplusTicketKeys) ? input.ticketplusTicketKeys.map(String) : (existing.ticketplusTicketKeys || []),
+    tixcraftStage: input.tixcraftStage || existing.tixcraftStage || null,
+    tixcraftTicketKeys: Array.isArray(input.tixcraftTicketKeys) ? input.tixcraftTicketKeys.map(String) : (existing.tixcraftTicketKeys || []),
+    excludeAccessible: input.excludeAccessible === undefined ? (existing.excludeAccessible ?? true) : !!input.excludeAccessible,
     running: !!existing.running,
     checks: Number(existing.checks || 0),
     lastCheck: existing.lastCheck || '',
@@ -724,6 +975,41 @@ function normalizeMonitor(input, existing = {}) {
     detectedAt: existing.detectedAt || ''
   };
 }
+
+
+
+app.post('/api/tixcraft/stages', async (req, res) => {
+  const url = cleanText(req.body?.url);
+  if (!url) return res.status(400).json({ error: '請貼拓元活動網址。' });
+  if (siteType(url) !== 'tixcraft') return res.status(400).json({ error: '請貼 tixcraft.com 的活動網址。' });
+  try { res.json(await discoverTixcraftStages(url)); }
+  catch (e) { res.status(400).json({ error: e.message }); }
+});
+app.post('/api/tixcraft/tickets', async (req, res) => {
+  const url = cleanText(req.body?.url), stage = req.body?.stage;
+  if (!url || !stage) return res.status(400).json({ error: '請先選擇拓元場次。' });
+  if (siteType(url) !== 'tixcraft') return res.status(400).json({ error: '請貼 tixcraft.com 的活動網址。' });
+  try { res.json(await discoverTixcraftTickets(url, stage)); }
+  catch (e) { res.status(400).json({ error: e.message }); }
+});
+
+app.post('/api/ticketplus/stages', async (req, res) => {
+  try {
+    const url = String(req.body?.url || '').trim();
+    if (siteType(url) !== 'ticketplus') return res.status(400).json({ error: '請貼 Ticket Plus 活動網址。' });
+    const result = await discoverTicketplusStages(url);
+    res.json(result);
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+app.post('/api/ticketplus/tickets', async (req, res) => {
+  try {
+    const url = String(req.body?.url || '').trim();
+    if (siteType(url) !== 'ticketplus') return res.status(400).json({ error: '請貼 Ticket Plus 活動網址。' });
+    if (!req.body?.stage) return res.status(400).json({ error: '請先選擇場次。' });
+    const result = await discoverTicketplusTickets(url, req.body.stage);
+    res.json(result);
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
 
 app.get('/api/monitors', (req, res) => res.json(store.monitors.map(publicMonitor)));
 
