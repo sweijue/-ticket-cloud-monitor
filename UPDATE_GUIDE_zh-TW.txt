@@ -1,47 +1,28 @@
-Ticket Monitor V4.0 - 通用網頁監控核心
+V4.0.2 單一通用腳本更新
 
-這版的核心改動
-1. 預設監控不再以「票種」為核心，而是「智慧整頁變化」。
-2. 新增執行模式：
-   - 自動（建議）：先用 Railway；遇到限制/登入/連續抓取失敗時等待本機接手。
-   - 僅雲端
-   - 僅本機
-3. 新增「通用本機監控腳本」：同一支腳本可用在不同 HTTP(S) 網站。
-4. 通用本機腳本支援：
-   - 智慧整頁（預設）
-   - 指定頁面區域，可多個
-   - 指定文字出現 / 消失
-   - 刪除個別監控目標
-5. 已知售票網站的專用解析器仍保留，但改成選配加強，不是核心限制。
-6. Auto fallback 不再限定 Ticket Plus / 拓元；任何有效 HTTP(S) 網址都可配對本機。
-7. 如果監控已經因雲端失敗進入「等待本機」，可直接按「配對本機」，不用先停止。
+這版修正：
+1. 通用腳本不再每個網站都顯示。只有「管理頁已建立 + 已登記本機」的網址才會出現監控面板。
+2. 遠大 Ticket Plus、拓元 Tixcraft、一般網頁共用同一支 universal-linked.user.js，不需要再安裝專屬腳本。
+3. 新增「自動／僅本機」監控時，若偵測到新版通用腳本會自動登記；既有監控也可按「登記本機」一次完成。正常情況不用再複製貼上配對碼。
+4. 刪除監控後，管理頁會同步清除該網址的本機登記。
+5. 沿用 V4.0.1 的 Railway 啟動修正。
 
-GitHub 更新
-請把 ZIP 內的檔案覆蓋／新增到原 repo：
+GitHub 更新：
 - server.js
 - public/app.js
 - public/index.html
-- public/universal-linked.user.js   ← 新增，最重要
-- public/ticketplus-linked.user.js  ← 保留 Ticket Plus 專用加強
-- public/tixcraft-linked.user.js    ← 保留拓元專用加強
+- public/universal-linked.user.js
+- public/ticketplus-linked.user.js（舊腳本停用相容層）
+- public/tixcraft-linked.user.js（舊腳本停用相容層）
 
-不要刪除你 repo 原本的：
-- Dockerfile
-- package.json
-- public/style.css
-- Railway Volume / DATA_DIR 資料
+請保留原本 Dockerfile、package.json、public/style.css 與 Railway Volume。
 
-建議第一次測試
-1. 部署完成後，管理頁版本應顯示 V4.0 通用網頁監控。
-2. 新增一筆一般網頁，執行位置選「自動」。
-3. 判斷方式保持「智慧整頁變化」。
-4. 先按「測試抓取」確認雲端能讀。
-5. 按「配對本機」，在目標網頁安裝/更新 public/universal-linked.user.js 並貼配對碼。
-6. 第一次配對會自動建立「智慧整頁」基準，不需要先選票種。
-7. 如果雲端正常，本機面板會顯示雲端執行、本機待命；如果雲端被限制，會自動改為本機接手。
+Tampermonkey / Userscripts：
+- 只需要保留並更新 Universal Linked Web Monitor 到 V4.0.2。
+- 舊 Ticket Plus / Tixcraft 腳本更新到 4.0.2 後會自動變成不執行的相容層；也可以直接停用它們。
 
-注意
-- 本機接手需要 Windows / SE2 已開機，且目標分頁在前景。
-- 太密集刷新仍可能觸發網站流量限制。腳本不繞過 CAPTCHA、排隊或反機器人驗證。
-- 「智慧整頁」會排除常見時間與長 token 雜訊，但非常動態的網站仍可能誤報；這時改用「指定頁面區域」最準。
-- 世界上無法保證每一個網站都能直接監控；V4 的重點是新網站可以先走通用模式，不需要再改整套系統。
+使用方式：
+1. 在管理頁建立監控；若已安裝 V4.0.2 通用腳本，新增「自動／僅本機」監控會優先自動登記。
+2. 舊監控如果以前是用 Ticket Plus／拓元專屬腳本，只要在該筆按一次「登記本機」完成轉移。
+3. 管理頁顯示「已自動登記」後，開啟目標網頁。
+4. 只有這些已登記的網址會看到「網頁監控」按鈕。其他網站完全不顯示。

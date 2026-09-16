@@ -50,7 +50,7 @@ async function getBrowser() {
 }
 
 // KKTIX diagnostics v3.1: ordinary browser state only, no anti-bot bypass.
-const BUILD_VERSION = '4.0.0-universal';
+const BUILD_VERSION = '4.0.2-unified';
 const DIAGNOSTICS_DIR = path.join(DATA_DIR, 'diagnostics');
 const SESSION_DIR = path.join(DATA_DIR, 'browser-sessions');
 await fs.mkdir(DIAGNOSTICS_DIR, { recursive: true, mode: 0o700 });
@@ -998,7 +998,7 @@ function publicMonitor(m) {
   const r = runtime.get(m.id) || {};
   const { localKeyHash, ...safe } = m;
   if (m.execution === 'browser' || (m.execution === 'auto' && m.fallbackToLocal)) return localPublic(m, safe);
-  return { ...safe, state: r.state || (m.pauseReason ? 'paused' : m.running ? 'running' : 'stopped'),
+  return { ...safe, localPaired: !!m.localKeyHash, localUrl: ['auto','browser'].includes(m.execution) ? localUrl(m.url, m.tixcraftStage) : '', state: r.state || (m.pauseReason ? 'paused' : m.running ? 'running' : 'stopped'),
     activeExecution: m.execution === 'auto' ? 'cloud' : m.execution,
     nextAt: r.nextAt || null, lastError: r.lastError ?? m.lastError ?? '', siteType: siteType(m.url) };
 }
@@ -1198,7 +1198,7 @@ function localPublic(m, safe) {
   if (m.detectedAt) state = 'detected';
   else if (m.running) state = m.localLeaseUntil > Date.now() ? (m.localState === 'waiting' ? 'waiting' : 'local_active') : 'waiting_device';
   else if (m.pauseReason) state = 'paused';
-  return { ...safe, localPaired: !!m.localKeyHash, state,
+  return { ...safe, localPaired: !!m.localKeyHash, localUrl: localUrl(m.url, m.tixcraftStage), state,
     activeExecution: m.execution === 'auto' ? (m.fallbackToLocal ? 'browser' : 'cloud') : m.execution,
     localRequested: m.execution === 'browser' || (m.execution === 'auto' && m.fallbackToLocal),
     fallbackReason: m.fallbackReason || '',
