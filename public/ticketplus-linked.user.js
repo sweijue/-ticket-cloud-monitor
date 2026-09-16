@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ticket Plus Linked Monitor
 // @namespace    local.ticket-monitor.se2
-// @version      1.3.1
+// @version      1.4.0
 // @description  Ticket Plus 單場前景監控：選票種、排除身障票、重整後繼續、ntfy 提醒。不代購、不匯出登入資訊。
 // @match        https://ticketplus.com.tw/*
 // @match        https://www.ticketplus.com.tw/*
@@ -29,7 +29,7 @@
 (() => {
   'use strict';
   if (window.top !== window.self) return;
-  const VERSION = '1.3.0';
+  const VERSION = '1.4.0';
 
   const rawGM = typeof GM === 'undefined' ? {} : GM;
   const adapter = {
@@ -256,6 +256,52 @@
     }
     return segments.join(' > ');
   }
+  function manualRowFromTarget(seed) {
+    let el = seed?.nodeType === 1 ? seed : seed?.parentElement;
+    const seedText = norm(seed?.nodeType === 1 ? text(seed) : seed?.textContent || '');
+    for (let n=0; el && n<16 && !el.matches('body,html'); n++, el=el.parentElement) {
+      if (el.closest(`#${HOST_ID}`)) return null;
+      const s=text(el);
+      if (!s || s.length>1800 || INSTRUCTIONS.test(s)) continue;
+      const ps=prices(s);
+      if (!ps.length) continue;
+      const strict=makeRow(el,seed,true);
+      if (strict) return strict;
+      const price=ps[0];
+      let label='';
+      if (seedText && seedText.length>=2 && seedText.length<140 && !prices(seedText).length) label=cleanTicketLabel(seedText,price);
+      if (!label || label.length<2) label=cleanTicketLabel(s,price);
+      if (!label || label.length<2) continue;
+      const controls=[...el.querySelectorAll(QTY_SELECTOR)].filter(visible);
+      const validSelect=controls.find(q=>q.tagName==='SELECT' && enabled(q) && [...q.options].some(o=>!o.disabled && /^\d+$/.test(String(o.value).trim()) && Number(o.value)>0));
+      const validInput=controls.find(q=>q.tagName!=='SELECT' && enabled(q) && (!q.hasAttribute('max') || Number(q.getAttribute('max'))>0));
+      const plus=plusControl(el), count=countEvidence(s);
+      let state='unknown', reason='已手動選取；等待頁面顯示可購買／售完證據';
+      if (SOLD.test(s) || count===0) { state='sold'; reason='票種列顯示售完或剩餘 0'; }
+      else if (FUTURE.test(s)) { state='not_started'; reason='尚未開賣、暫停或販售結束'; }
+      else if (validSelect || validInput || plus || count>0) { state='available'; reason='票種列有可操作數量或明示剩餘票'; }
+      const selector=selectorFor(el);
+      return {key:`sel:${selector}|${price}`,label,price,state,reason,accessible:ACCESSIBLE.test(label),preview:s.slice(0,300),el,selector};
+    }
+    return null;
+  }
+  function evidenceForSaved(saved) {
+    if (!saved?.selector) return null;
+    try {
+      const el=document.querySelector(saved.selector);
+      if (!el) return null;
+      const row=makeRow(el,el,true) || manualRowFromTarget(el);
+      if (!row) return null;
+      return {...row,key:saved.key,label:saved.label,price:saved.price,accessible:!!saved.accessible,selector:saved.selector};
+    } catch (_) { return null; }
+  }
+  async function saveSelectionDraft() {
+    settings.selected = rows.filter(r=>selected.has(r.key)).map(serialRow);
+    settings.verified = false;
+    try { await adapter.setValue(SETTING_PREFIX + settingURL, settings); } catch (_) {}
+    renderSelectionSummary();
+  }
+
   const serialRow = r => ({ key: r.key, label: r.label, price: r.price, accessible: r.accessible, selector:r.selector || selectorFor(r.el) });
   const rowStamp = rows => JSON.stringify(rows.map(r => [r.key, r.state]).sort((a,b) => a[0].localeCompare(b[0])));
   const stateLabel = s => ({ available:'可選購', sold:'售完／0 張', not_started:'未開賣／已結束', unknown:'無法確認' }[s] || '無法確認');
@@ -273,8 +319,8 @@
       button:disabled{opacity:.45;cursor:default}input:not([type=checkbox]),select{width:100%;border:1px solid #bac7d4;border-radius:8px;padding:9px;min-height:40px;font-size:16px;background:#fff;color:#142539}
       label{display:block;margin:8px 0 4px}input[type=checkbox]{width:18px;height:18px;vertical-align:middle;flex:none}
       #toggle{position:fixed;bottom:12px;left:10px;z-index:2147483647;background:#14334d;color:white;box-shadow:0 3px 10px #0003}#toggle.running{background:#087a55;border-color:#087a55}#toggle.stopped{background:#14334d}
-      #panel{position:fixed;z-index:2147483647;bottom:64px;left:8px;width:calc(100vw - 16px);max-width:420px;max-height:70vh;overflow:auto;-webkit-overflow-scrolling:touch;border:1px solid #bac7d4;border-radius:14px;background:#fff;box-shadow:0 8px 35px #0004;padding:12px;padding-bottom:16px}
-      #panel[hidden]{display:none}#status{padding:8px;background:#eef4f8;border-radius:8px;white-space:pre-wrap;overflow-wrap:anywhere}
+      #panel{position:fixed;z-index:2147483647;bottom:64px;left:8px;width:calc(100vw - 16px);max-width:440px;max-height:82vh;overflow:auto;-webkit-overflow-scrolling:touch;border:1px solid #bac7d4;border-radius:14px;background:#fff;box-shadow:0 8px 35px #0004;padding:12px;padding-bottom:0}
+      #panel[hidden]{display:none}#stateCard{padding:10px;border-radius:10px;border:1px solid #cbd6df;background:#f4f7fa;margin:8px 0}#stateCard.running{background:#ebfaf4;border-color:#5ab99b}#stateCard.stopped{background:#f7f8fa;border-color:#ccd3da}#stateCard.error{background:#fff0ee;border-color:#dc8c82}#runTitle{font-size:15px}#status{margin:6px 0 0;white-space:pre-wrap;overflow-wrap:anywhere}#selectionSummaryTop{margin-top:6px;font-size:12px;color:#42596d;overflow-wrap:anywhere}#actionBar{position:sticky;bottom:0;margin:12px -12px 0;padding:10px 12px;background:#fff;border-top:1px solid #dce4ea;box-shadow:0 -5px 14px #00000012;z-index:5}
       .line{display:flex;gap:7px;align-items:center;margin:8px 0}.line>*{flex:1}.line input[type=checkbox]{flex:none}.top{justify-content:space-between}.top strong{font-size:16px}
       .primary{background:#11656c;color:#fff;border-color:#11656c}.danger{background:#ad3636;color:#fff;border-color:#ad3636}
       .small{font-size:12px;color:#516476}.warn{font-size:12px;color:#8b4e10}.ticket{padding:8px;border:1px solid #dde5ec;border-radius:9px;margin:6px 0;display:flex;gap:8px;align-items:flex-start}
@@ -285,8 +331,12 @@
     <button type="button" id="toggle">監票</button>
     <section id="panel">
       <div class="line top"><strong>Ticket Plus 電腦 / SE2 監控</strong><button type="button" id="collapse">收合</button></div>
-      <div class="small">1.3.1 · 監控狀態顯示修正版 · 本機執行</div>
-      <p id="status">正在啟動…</p>
+      <div class="small">1.4.0 · 狀態／票種同步修正版 · 本機執行</div>
+      <div id="stateCard" class="stopped">
+        <div class="line top"><strong id="runTitle">⏹ 已停止</strong><span id="runChecks" class="small">0 次</span></div>
+        <p id="status">正在啟動…</p>
+        <div id="selectionSummaryTop">已選 0 個票種</div>
+      </div>
       <p id="notice"></p><p id="debugAction" class="small">最後操作：尚未操作</p>
       <details id="linkDetails"><summary>連到原本的管理頁（電腦 / SE2 共用）</summary>
       <p id="linkState" class="small">未配對；單機設定不會自動同步。</p>
@@ -318,11 +368,11 @@
         <div id="scheduleFields" hidden><label>開始<input id="startAt" type="datetime-local"></label><label>結束<input id="endAt" type="datetime-local"></label></div>
         <label><input id="pauseAlerts" type="checkbox" checked> 讀不到票種或需要登入時也通知</label>
         <label><input id="sound" type="checkbox"> 嘗試 本機提示音（重整後可能無聲）</label>
-        <p class="warn">間隔在頁面載入、讀取完成後才開始計時，實際週期更長。1～5 秒可能觸發網站限制，不是防封鎖模式。</p>
+        <p class="warn">間隔在頁面載入、讀取完成後才開始計時。秒數過短可能觸發網站暫停存取；看到限制頁時請立即停止。</p>
       </details>
-      <div class="line"><button type="button" id="start" class="primary">開始監控</button><button type="button" id="stop" class="danger">停止</button></div>
       <button type="button" id="retry" hidden>重送未成功的通知</button>
       <div class="small">只讀畫面，不選位、不加張數、不下單。找到有票會先停止刷新。請讓這個瀏覽器分頁保持前景。</div>
+      <div id="actionBar"><div class="line"><button type="button" id="start" class="primary">開始監控</button><button type="button" id="stop" class="danger">停止</button></div></div>
     </section>`;
   const $ = id => shadow.getElementById(id);
   let settings = { name:'Ticket Plus 票況', topic:'', exclude:true, mode:'random', min:1, max:5, fixed:5, scheduled:false, startAt:'', endAt:'', pauseAlerts:true, sound:false, selected:[], verified:false };
@@ -346,6 +396,12 @@
     const next = runtime.running && runtime.nextAt ? `\n下次刷新：約 ${Math.max(0, Math.ceil((runtime.nextAt-clock())/1000))} 秒後` : '';
     $('status').textContent = `${runtime.message || '待設定'}${count}${next}`;
     const seconds = runtime.running && runtime.nextAt ? Math.max(0, Math.ceil((runtime.nextAt-clock())/1000)) : null;
+    const title = runtime.running ? `🟢 監控中${seconds!==null ? ` · ${seconds} 秒` : ''}` : (/錯誤|失敗|限制|驗證|無法|缺少/.test(runtime.message||'') ? '🔴 已停止' : '⏹ 已停止');
+    $('runTitle').textContent = title;
+    $('runChecks').textContent = `${Number(runtime.checks||0)} 次`;
+    $('stateCard').classList.toggle('running', !!runtime.running);
+    $('stateCard').classList.toggle('stopped', !runtime.running);
+    $('stateCard').classList.toggle('error', !runtime.running && /錯誤|失敗|限制|驗證|無法|缺少/.test(runtime.message||''));
     $('toggle').textContent = runtime.running ? `監票 · 執行中${seconds!==null ? ` · ${seconds}秒` : ''}` : '監票 · 已停止';
     $('toggle').classList.toggle('running', !!runtime.running);
     $('toggle').classList.toggle('stopped', !runtime.running);
@@ -356,6 +412,7 @@
     $('start').disabled = !!runtime.running;
     for (const id of ['name','topic','exclude','verified','mode','min','max','fixed','scheduled','startAt','endAt','pauseAlerts','sound'])
       $(id).disabled = !!runtime.running || (!!link && ['name','topic','exclude','mode','min','max','fixed','scheduled','startAt','endAt'].includes(id));
+    renderSelectionSummary();
   }
   function runtimeStorageKey(url = settingURL || canonicalURL()) {
     return `${RUNTIME_KEY}.${url}`;
@@ -393,14 +450,14 @@
     await adapter.setValue('se2TicketMonitor.defaultTopic', settings.topic);
   }
   function renderSelectionSummary() {
-    const chosen = rows.filter(r => selected.has(r.key));
-    const box = $('selectionSummary');
-    if (!box) return;
-    if (!chosen.length) {
-      box.textContent = '已選 0 個票種';
-      return;
-    }
-    box.textContent = `已選 ${chosen.length} 個：${chosen.map(r => `${r.label} $${Number(r.price||0).toLocaleString()}`).join('、')}`;
+    let chosen = rows.filter(r => selected.has(r.key));
+    if (!chosen.length && Array.isArray(settings.selected) && settings.selected.length)
+      chosen = settings.selected.filter(r => selected.has(r.key) || !selected.size);
+    const textValue = chosen.length
+      ? `已選 ${chosen.length} 個：${chosen.map(r => `${r.label} $${Number(r.price||0).toLocaleString()}`).join('、')}`
+      : '已選 0 個票種';
+    const box = $('selectionSummary'); if (box) box.textContent = textValue;
+    const top = $('selectionSummaryTop'); if (top) top.textContent = textValue;
   }
 
   function renderRows() {
@@ -408,7 +465,7 @@
     list.replaceChildren();
     if (!rows.length) {
       const p = document.createElement('p'); p.className = 'small';
-      p.textContent = '尚未辨識到票種。可等網頁載入後再讀取，或按「點選票種」。';
+      p.textContent = '尚未辨識到票種。可等網頁載入後再讀取，或按「手動多選票種」。';
       list.appendChild(p); renderSelectionSummary(); return;
     }
     for (const row of rows) {
@@ -424,6 +481,7 @@
         renderSelectionSummary();
         notice(box.checked ? `已加入：${row.label}。目前共選 ${selected.size} 個。` : `已取消：${row.label}。目前共選 ${selected.size} 個。`);
         $('debugAction').textContent=`最後操作：${box.checked?'勾選':'取消'} ${row.label}`;
+        saveSelectionDraft().catch(()=>{});
       });
       const span = document.createElement('span'), b = document.createElement('b'), small = document.createElement('small');
       b.textContent = `${row.label} · $${row.price.toLocaleString()}`;
@@ -534,8 +592,8 @@
       for (const saved of settings.selected) {
         if (map.has(saved.key) || !saved.selector) continue;
         try {
-          const candidate = rowEvidence(document.querySelector(saved.selector));
-          if (candidate && candidate.key === saved.key) { current.push(candidate); map.set(candidate.key,candidate); }
+          const candidate = evidenceForSaved(saved);
+          if (candidate) { current.push(candidate); map.set(saved.key,candidate); }
         } catch (_) { /* Stale selector is not a ticket match. */ }
       }
       // Match by stable ticket name/price or a website-provided ID; never by list position.
@@ -622,31 +680,51 @@
     if (runtime.running) await halt('已停止刷新，重新讀取票種。');
     const gate=pageGate(); if (gate) throw Error(gate);
     if (!isOrder()) throw Error('請先在 Ticket Plus 打開單場 /order/ 票種頁。');
-    rows=detectRows();
+    const detected=detectRows();
     const old=new Set(settings.selected.map(r=>r.key));
-    selected=new Set(rows.filter(r=>old.size && old.has(r.key) && !(settings.exclude&&r.accessible)).map(r=>r.key));
+    if (detected.length) {
+      rows=detected;
+      selected=new Set(rows.filter(r=>old.has(r.key) && !(settings.exclude&&r.accessible)).map(r=>r.key));
+    } else {
+      rows=settings.selected.map(w=>({...w,state:'unknown',reason:'已保留先前選擇；自動讀取目前找不到這一列'}));
+      selected=new Set(rows.filter(r=>!(settings.exclude&&r.accessible)).map(r=>r.key));
+    }
     settings.verified=false; $('verified').checked=false;
     renderRows();
-    notice(rows.length?`讀到 ${rows.length} 個候選票種。請直接勾選一個或多個；如果名稱不對，可改用「手動多選票種」。`:'自動辨識仍找不到票種。請按「手動多選票種」，直接在售票頁連續點選票種列。');
+    await saveSelectionDraft();
+    notice(detected.length?`讀到 ${detected.length} 個候選票種。可一次勾選多個。`:'自動辨識目前找不到票種；已保留先前選擇。請改用「手動多選票種」直接點票種列。');
   }
   async function start() {
     notice('正在啟動監控…');
-    setStatus('正在啟動監控…');
+    setStatus('啟動中：正在確認設定…');
     renderStatus();
     await ensureProfile();
-    if (runtime.running) return;
+    if (runtime.running) { notice('目前已經在監控中。'); return; }
     readSettingsUI(); validate(settings);
     await saveSettings();
     const savedPending=runtime.pending;
     if (savedPending && !confirm('還有未確認送達的通知。開始新監控會清除這筆待重送通知，確定嗎？')) return;
-    let localRunId='';
-    if(link){const gate=pageGate();if(gate)throw Error(gate);await saveSharedSelection();const cfg=await relay('begin');localRunId=cfg.runId;applyShared(cfg,false);}
     ++cycleToken; clearTimer();
-    runtime={localRunId,url:canonicalURL(),running:true,checks:0,message:'監控中：正在確認票種狀態…',nextAt:0,pending:null};
+    runtime={localRunId:'',url:canonicalURL(),running:true,checks:0,message:'🟢 監控已啟動：正在連接管理頁並確認票種…',nextAt:0,pending:null};
     renderStatus(); renderRows();
-    notice('✅ 已開始監控。偵測到可選購會先停止刷新並通知；監控中請勿操作購票按鈕。');
-    await saveRuntime(); await beep();
-    checkAndSchedule().catch(handleError);
+    await saveRuntime();
+    try {
+      if(link){
+        const gate=pageGate(); if(gate) throw Error(gate);
+        await saveSharedSelection();
+        const cfg=await relay('begin');
+        runtime.localRunId=cfg.runId || '';
+        applyShared(cfg,false);
+      }
+      runtime.message='🟢 監控中：正在確認票種狀態…';
+      renderStatus();
+      notice('✅ 監控已開始。下方按鈕會維持「監控中 ✓」，左下角也會顯示執行中。');
+      await saveRuntime(); await beep();
+      checkAndSchedule().catch(handleError);
+    } catch(e) {
+      runtime.running=false; runtime.nextAt=0; runtime.message=`啟動失敗：${e?.message || e}`;
+      renderStatus(); await saveRuntime(); throw e;
+    }
   }
   async function ensureProfile() {
     const u=canonicalURL();
@@ -691,8 +769,12 @@
     for(const k of ['name','topic','mode','min','max','fixed','exclude']) settings[k]=cfg[k];
     settings.scheduled=false;
     if(replaceSelection){
-      settings.selected=cfg.selected||[];settings.verified=false;
-      rows=settings.selected.map(w=>({...w,state:'unknown',reason:'\u5f9e\u5171\u7528\u8a2d\u5b9a\u8b80\u53d6\uff0c\u8acb\u6838\u5c0d\u672c\u6a5f\u9801\u9762'}));
+      const incoming=cfg.selected||[];
+      const oldKeys=(settings.selected||[]).map(w=>w.key).sort().join('\n');
+      const newKeys=incoming.map(w=>w.key).sort().join('\n');
+      const keepVerified=!!settings.verified && oldKeys===newKeys && !!newKeys;
+      settings.selected=incoming;settings.verified=keepVerified;
+      rows=settings.selected.map(w=>({...w,state:'unknown',reason:'從共用設定讀取，等待本機頁面確認'}));
       selected=new Set(settings.selected.map(w=>w.key));
     }
     fillUI();renderStatus();if(replaceSelection)renderRows();
@@ -748,7 +830,7 @@
   $('exclude').onchange=()=>{
     settings.exclude=$('exclude').checked; settings.verified=false; $('verified').checked=false; renderRows();
   };
-  $('verified').onchange=()=>{ notice($('verified').checked ? `已確認目前選擇：${selected.size} 個票種。` : '已取消票種核對。'); };
+  $('verified').onchange=()=>{ settings.verified=$('verified').checked; adapter.setValue(SETTING_PREFIX+settingURL,{...settings,selected:rows.filter(r=>selected.has(r.key)).map(serialRow)}).catch(()=>{}); notice($('verified').checked ? `已確認目前選擇：${selected.size} 個票種。` : '已取消票種核對。'); };
 
   action('connectLink',async()=>{
     if(runtime.running)throw Error('\u8acb\u5148\u505c\u6b62\u76e3\u63a7\u3002');
@@ -767,12 +849,12 @@
   action('selectAll',async()=>{
     if (runtime.running) await halt('已停止監控，準備修改票種。');
     selected = new Set(rows.filter(r => !(settings.exclude && r.accessible)).map(r => r.key));
-    settings.verified=false; $('verified').checked=false; renderRows();
+    settings.verified=false; $('verified').checked=false; renderRows(); await saveSelectionDraft();
     notice(`已選 ${selected.size} 個一般票種。請核對後勾選「我已核對」。`);
   });
   action('clearSelection',async()=>{
     if (runtime.running) await halt('已停止監控，準備修改票種。');
-    selected.clear(); settings.verified=false; $('verified').checked=false; renderRows();
+    selected.clear(); settings.verified=false; $('verified').checked=false; renderRows(); await saveSelectionDraft();
     notice('已清除所有票種選擇。');
   });
   action('start',start);
@@ -796,13 +878,13 @@
     notice('手動多選中：請直接點售票頁上的票種名稱、價格或整列。');
     panel(false); $('toggle').textContent=`已選 ${selected.size} 個｜點我完成`;
   });
-  action('pickAdd',async()=>{ unpick(); panel(true); renderRows(); notice(`手動選擇完成，目前已選 ${selected.size} 個票種。`); });
+  action('pickAdd',async()=>{ unpick(); panel(true); renderRows(); await saveSelectionDraft(); notice(`手動選擇完成，目前已選 ${selected.size} 個票種。`); });
   action('pickCancel',async()=>{unpick();panel(true);renderRows();renderStatus();});
   document.addEventListener('click',event=>{
     if (event.composedPath().includes(host)) return;
     if (pickMode) {
       event.preventDefault(); event.stopImmediatePropagation();
-      const row=findRow(event.target, true);
+      const row=manualRowFromTarget(event.target);
       if (!row) {
         $('toggle').textContent=`沒抓到這一列｜已選 ${selected.size} 個`;
         setTimeout(()=>{ if(pickMode)$('toggle').textContent=`已選 ${selected.size} 個｜點我完成`; },1200);
@@ -824,6 +906,8 @@
         row.el.style.outline='3px solid #0c8276';
       }
       settings.verified=false; $('verified').checked=false;
+      renderSelectionSummary();
+      saveSelectionDraft().catch(()=>{});
       $('toggle').textContent=`已選 ${selected.size} 個｜點我完成`;
     } else if (runtime.running) {
       halt('你開始操作售票頁，已停止刷新。').catch(handleError);
@@ -850,6 +934,13 @@
     localClientId=await adapter.getValue('tcm.clientId','');
     if(!localClientId){ localClientId=uniqueId(); await adapter.setValue('tcm.clientId',localClientId); }
     await ensureProfile();
+    if (link) {
+      try {
+        const cfg=await relay('sync');
+        applyShared(cfg,true);
+        await adapter.setValue(SETTING_PREFIX+settingURL,settings);
+      } catch(e) { notice('管理頁同步失敗：'+(e?.message||e)); }
+    }
     const restored=await adapter.getValue(runtimeStorageKey(settingURL),null);
     if (restored&&restored.url===settingURL) {
       runtime={...runtime,...restored,nextAt:0};
