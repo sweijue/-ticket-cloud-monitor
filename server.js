@@ -24,7 +24,7 @@ app.use(express.json({ limit: '512kb' }));
 
 if (ADMIN_PASSWORD) {
   app.use((req, res, next) => {
-    if (req.path === '/healthz') return next();
+    if (req.path === '/healthz' || (req.path === '/api/local' && req.method === 'POST')) return next();
     const auth = req.headers.authorization || '';
     const expected = `Basic ${Buffer.from(`admin:${ADMIN_PASSWORD}`).toString('base64')}`;
     if (auth !== expected) {
@@ -50,7 +50,7 @@ async function getBrowser() {
 }
 
 // KKTIX diagnostics v3.1: ordinary browser state only, no anti-bot bypass.
-const BUILD_VERSION = '3.4.0-ticketplus-order-diagnostic';
+const BUILD_VERSION = '3.5.0-local-linked';
 const DIAGNOSTICS_DIR = path.join(DATA_DIR, 'diagnostics');
 const SESSION_DIR = path.join(DATA_DIR, 'browser-sessions');
 await fs.mkdir(DIAGNOSTICS_DIR, { recursive: true, mode: 0o700 });
@@ -515,7 +515,7 @@ function parseGenericHtml(html, m) {
 function isTicketplusOrderUrl(url) {
   try {
     const u = new URL(url);
-    return u.hostname.toLowerCase().includes('ticketplus.com.tw') && /^\/order\//i.test(u.pathname);
+    return u.protocol === 'https:' && !u.port && /^(?:www\.)?ticketplus\.com\.tw$/.test(u.hostname) && /^\/order\/[a-z0-9_-]+\/[a-z0-9_-]+\/?$/i.test(u.pathname);
   } catch { return false; }
 }
 
@@ -926,12 +926,14 @@ async function notify(m, result) {
 
 function publicMonitor(m) {
   const r = runtime.get(m.id) || {};
-  return { ...m, state: r.state || (m.pauseReason ? 'paused' : m.running ? 'running' : 'stopped'),
+  const { localKeyHash, ...safe } = m;
+  if (m.execution === 'browser') return localPublic(m, safe);
+  return { ...safe, state: r.state || (m.pauseReason ? 'paused' : m.running ? 'running' : 'stopped'),
     nextAt: r.nextAt || null, lastError: r.lastError ?? m.lastError ?? '', siteType: siteType(m.url) };
 }
 
 function scheduleNext(m, delaySec) {
-  if (shuttingDown || !m.running || !store.monitors.includes(m)) return;
+  if (shuttingDown || m.execution === 'browser' || !m.running || !store.monitors.includes(m)) return;
   clearTimeout(runtime.get(m.id)?.timer);
   const nextAt = Date.now() + delaySec * 1000;
   const timer = setTimeout(() => dispatchMonitor(m.id), delaySec * 1000);
@@ -953,7 +955,7 @@ function dispatchMonitor(id) {
 
 async function runMonitor(id) {
   const m = store.monitors.find(x => x.id === id);
-  if (!m || !m.running || shuttingDown || activeRuns.has(id)) return;
+  if (!m || m.execution === 'browser' || !m.running || shuttingDown || activeRuns.has(id)) return;
   clearTimeout(runtime.get(id)?.timer);
   if (activeInspections.has(id)) return scheduleNext(m, 1);
   if (!inSchedule(m)) {
@@ -1007,8 +1009,12 @@ function normalizeMonitor(input, existing = {}) {
   const url = String(input.url || existing.url || '').trim();
   const parsedUrl = new URL(url);
   if (!['http:', 'https:'].includes(parsedUrl.protocol) || parsedUrl.username || parsedUrl.password) throw new Error('Please use an HTTP(S) URL without credentials.');
+  const execution = input.execution ?? existing.execution ?? 'cloud';
+  if (!['cloud', 'browser'].includes(execution)) throw new Error('Invalid execution mode');
+  if (execution === 'browser' && !isTicketplusOrderUrl(url)) throw new Error('Local mode currently requires a Ticket Plus /order/ URL.');
   return {
     ...existing,
+    execution,
     id: existing.id || crypto.randomUUID(),
     name: String(input.name || existing.name || '').trim() || new URL(url).hostname,
     url,
@@ -1084,6 +1090,138 @@ app.post('/api/ticketplus/tickets', async (req, res) => {
   } catch (e) { res.status(400).json({ error: e.message }); }
 });
 
+
+// Local relay v3.5. This only accepts an explicitly paired, read-only ticket
+// observation from a foreground browser. No cookies or passwords are accepted.
+const LOCAL_LEASE_MS = 60000;
+const localOps = new Map();
+function localPublic(m, safe) {
+  let state = 'stopped';
+  if (m.detectedAt) state = 'detected';
+  else if (m.pauseReason) state = 'paused';
+  else if (m.running) state = m.localLeaseUntil > Date.now() ? (m.localState === 'waiting' ? 'waiting' : 'local_active') : 'waiting_device';
+  return { ...safe, localPaired: !!m.localKeyHash, state,
+    localOnline: !!(m.running && m.localLeaseUntil > Date.now()),
+    nextAt: m.localLeaseUntil > Date.now() ? (m.localNextAt || null) : null,
+    siteType: siteType(m.url) };
+}
+function localUrl(url) {
+  if (!isTicketplusOrderUrl(url)) throw new Error('Expected Ticket Plus /order/ URL');
+  const u = new URL(url); return `${u.origin}${u.pathname.replace(/\/+$/, '')}`;
+}
+function localConfig(m) {
+  return { id:m.id, url:localUrl(m.url), name:m.name, topic:m.ntfyTopic,
+    min:m.minSeconds, max:m.maxSeconds, fixed:m.fixedSeconds, mode:m.intervalMode,
+    exclude:m.excludeAccessible !== false, selected:m.localSelection || [],
+    limitedTime:!!m.limitedTime, startTime:m.startTime, endTime:m.endTime,
+    timezone:TZ, inSchedule:inSchedule(m), running:!!m.running, runId:m.localRunId || '',
+    state:m.localState || 'stopped', version:m.localConfigVersion || 0 };
+}
+function localOwner(m, clientId) {
+  return m.localClientId === clientId && m.localLeaseUntil > Date.now();
+}
+function localAcquire(m, clientId, name) {
+  if (m.localLeaseUntil > Date.now() && m.localClientId !== clientId)
+    throw monitorError('another_device', '\u53e6\u4e00\u53f0\u88dd\u7f6e\u6b63\u5728\u57f7\u884c\uff0c\u8acb\u5148\u5728\u90a3\u53f0\u6309\u505c\u6b62\uff0c\u6216\u7b49\u5f85 60 \u79d2\u96e2\u7dda\u5224\u5b9a\u3002');
+  m.localClientId = clientId; m.localDeviceName = String(name || 'Browser').slice(0,40);
+  m.localLeaseUntil = Date.now() + LOCAL_LEASE_MS; m.localSeenAt = new Date().toISOString();
+}
+async function notifyLocal(m, summary) {
+  if (!m.ntfyTopic) return;
+  if (!/^[A-Za-z0-9_-]{1,64}$/.test(m.ntfyTopic)) throw Error('Invalid ntfy topic');
+  const r = await fetch('https://ntfy.sh/', { method:'POST',
+    headers:{'Content-Type':'application/json'}, signal:AbortSignal.timeout(10000),
+    body:JSON.stringify({topic:m.ntfyTopic, title:`${m.name} - \u7968\u6cc1\u901a\u77e5`,
+      message:summary, click:m.url, priority:5, tags:['ticket'],
+      actions:[{action:'view',label:'\u958b\u555f\u552e\u7968\u9801',url:m.url}]}) });
+  if (!r.ok) throw Error(`ntfy HTTP ${r.status}`);
+}
+app.post('/api/monitors/:id/pair-local', async (req,res) => {
+  if (!ADMIN_PASSWORD) return res.status(400).json({error:'Please set ADMIN_PASSWORD before pairing.'});
+  const m=store.monitors.find(x=>x.id===req.params.id);
+  if (!m) return res.status(404).json({error:'not found'});
+  if (!isTicketplusOrderUrl(m.url)) return res.status(400).json({error:'\u9019\u7248\u672c\u6a5f\u914d\u5c0d\u50c5\u652f\u63f4\u9060\u5927 /order/ \u55ae\u5834\u7db2\u5740\u3002'});
+  if (m.running || activeRuns.has(m.id) || activeInspections.has(m.id) || localOps.has(m.id))
+    return res.status(409).json({error:'\u8acb\u5148\u505c\u6b62\u9019\u7b46\u76e3\u63a7\uff0c\u7b49\u5f85\u672c\u6b21\u6aa2\u67e5\u7d50\u675f\u3002'});
+  const token=crypto.randomBytes(32).toString('base64url');
+  m.execution='browser';m.localKeyHash=diagnosticKey(token);m.localLeaseUntil=0;
+  m.localState='stopped';m.localRunId=crypto.randomUUID();m.pauseReason='';m.lastError='';
+  clearTimeout(runtime.get(m.id)?.timer); runtime.set(m.id,{state:'stopped',nextAt:null});
+  await saveStore();
+  res.json({token,monitorId:m.id,url:localUrl(m.url)});
+});
+app.post('/api/local', async (req,res) => {
+  if (!ADMIN_PASSWORD) return res.status(503).json({error:'Local pairing unavailable without admin authentication.'});
+  const b=req.body || {}, token=(req.headers.authorization || '').replace(/^Bearer /,'');
+  if (!/^[A-Za-z0-9_-]{43}$/.test(token)) return res.status(401).json({error:'Invalid pairing token'});
+  const hash=diagnosticKey(token);
+  const m=store.monitors.find(x=>x.id===b.monitorId);
+  if (!m || !m.localKeyHash || m.execution!=='browser' ||
+      !crypto.timingSafeEqual(Buffer.from(hash),Buffer.from(m.localKeyHash)))
+    return res.status(401).json({error:'\u914d\u5c0d\u5df2\u5931\u6548\uff0c\u8acb\u91cd\u65b0\u914d\u5c0d\u3002'});
+  if (localOps.has(m.id)) return res.status(409).json({error:'\u6b63\u5728\u8655\u7406\u4e0a\u4e00\u500b\u56de\u5831\uff0c\u8acb\u7a0d\u5f8c\u3002'});
+  localOps.set(m.id,true);
+  try {
+    if (localUrl(b.url)!==localUrl(m.url)) return res.status(400).json({error:'\u914d\u5c0d\u7684\u5834\u6b21\u8207\u76ee\u524d\u9801\u9762\u4e0d\u540c\u3002'});
+    const action=b.action, clientId=String(b.clientId || '');
+    if (!/^[a-zA-Z0-9_-]{16,80}$/.test(clientId)) return res.status(400).json({error:'Invalid client ID'});
+    if (!['sync','configure','begin','heartbeat','report','release','suspend'].includes(action)) return res.status(400).json({error:'Invalid action'});
+    if (action==='sync') return res.json(localConfig(m));
+    if (action==='configure') {
+      if (m.running && m.localLeaseUntil > Date.now()) return res.status(409).json({error:'\u5148\u505c\u6b62\u76e3\u63a7\uff0c\u518d\u66f4\u6539\u7968\u7a2e\u3002'});
+      if (!Array.isArray(b.selected) || b.selected.length<1 || b.selected.length>100 || b.verified!==true)
+        return res.status(400).json({error:'\u8acb\u5148\u9078\u7968\u7a2e\u4e26\u6838\u5c0d\u72c0\u614b\u3002'});
+      const selected=b.selected.map(t=>({key:String(t.key||'').slice(0,220),label:String(t.label||'').slice(0,140),
+        price:Number(t.price),accessible:!!t.accessible,selector:String(t.selector||'').slice(0,800)}));
+      if (selected.some(t=>!t.key || !t.label || !Number.isFinite(t.price) || t.price<0)) return res.status(400).json({error:'Invalid ticket selection'});
+      if (new Set(selected.map(t=>t.key)).size!==selected.length) return res.status(400).json({error:'Duplicate ticket keys'});
+      if (m.excludeAccessible!==false && selected.some(t=>t.accessible || isAccessibleTicketText(t.label))) return res.status(400).json({error:'\u5df2\u555f\u7528\u6392\u9664\u7279\u6b8a\u5e2d\uff0c\u8acb\u53d6\u6d88\u9019\u4e9b\u7968\u7a2e\u3002'});
+      m.localSelection=selected;m.localConfigVersion=(m.localConfigVersion || 0)+1;
+    } else if (action==='begin') {
+      if (!m.localSelection?.length) return res.status(400).json({error:'\u5c1a\u672a\u5132\u5b58\u7968\u7a2e\u3002'});
+      if (!/^[A-Za-z0-9_-]{1,64}$/.test(m.ntfyTopic || '')) return res.status(400).json({error:'\u8acb\u5148\u5728\u7ba1\u7406\u9801\u586b\u6b63\u78ba ntfy Topic\u3002'});
+      localAcquire(m,clientId,b.deviceName);
+      if (!m.running) { m.localRunId=crypto.randomUUID();m.localNonces=[]; }
+      m.running=true;m.detectedAt='';m.detected=false;m.pauseReason='';m.lastError='';
+      m.localState='running';
+    } else if (action==='heartbeat') {
+      if (!m.running) return res.json(localConfig(m));
+      if (b.runId!==m.localRunId) return res.status(409).json({error:'\u76e3\u63a7\u5df2\u91cd\u8a2d\uff0c\u8acb\u91cd\u65b0\u6309\u958b\u59cb\u3002'});
+      localAcquire(m,clientId,b.deviceName);
+      m.localState=inSchedule(m)?'running':'waiting';
+      m.localNextAt=Number.isFinite(b.nextAt)?Math.min(b.nextAt,Date.now()+3600000):null;
+    } else if (action==='report') {
+      if (!/^[a-zA-Z0-9_-]{16,80}$/.test(String(b.nonce || ''))) return res.status(400).json({error:'Invalid report ID'});
+      if ((m.localNonces || []).includes(b.nonce)) return res.json({...localConfig(m),duplicate:true});
+      if (!m.running || b.runId!==m.localRunId || !localOwner(m,clientId)) return res.status(409).json({error:'\u672c\u6b21\u56de\u5831\u5df2\u904e\u671f\u6216\u5df2\u505c\u6b62\uff0c\u4e0d\u767c\u9001\u901a\u77e5\u3002'});
+      if (!inSchedule(m)) return res.json({...localConfig(m),ignored:true});
+      if (!Array.isArray(b.rows) || b.rows.length>100) return res.status(400).json({error:'Invalid rows'});
+      const byKey=new Map(b.rows.map(t=>[String(t.key),t]));
+      const watched=(m.localSelection || []).map(t=>({...t,state:byKey.get(t.key)?.state,reason:String(byKey.get(t.key)?.reason||'').slice(0,180)}));
+      if (!watched.length || watched.some(t=>!['available','sold','not_started'].includes(t.state))) {
+        m.running=false;m.localLeaseUntil=0;m.pauseReason='local_unknown';m.lastError='\u672c\u6a5f\u672a\u8b80\u5230\u5b8c\u6574\u7968\u7a2e\uff0c\u5df2\u505c\u6b62\uff1b\u4e0d\u4ee3\u8868\u552e\u5b8c\u3002';
+      } else {
+        m.checks=Number(m.checks||0)+1;const t=nowParts();m.lastCheck=`${t.date} ${t.time}`;
+        m.localSeenAt=new Date().toISOString();m.localLeaseUntil=Date.now()+LOCAL_LEASE_MS;
+        const hits=watched.filter(t=>t.state==='available' && !(m.excludeAccessible!==false && (t.accessible || isAccessibleTicketText(t.label))));
+        m.lastResult=hits.length?hits.map(t=>`${t.label} $${t.price}: ${t.reason}`).join('\n'):`\u5df2\u6aa2\u67e5 ${watched.length} \u500b\u6307\u5b9a\u7968\u7a2e\uff0c\u76ee\u524d\u7121\u53ef\u9078\u8cfc\u8b49\u64da\u3002`;
+        m.lastError='';m.pauseReason='';m.localRows=watched.map(({key,label,price,state})=>({key,label,price,state}));
+        if (hits.length) {m.running=false;m.detected=true;m.detectedAt=m.lastCheck;m.localState='detected';m.localLeaseUntil=0;}
+      }
+      m.localNonces=[...(m.localNonces || []).slice(-9),b.nonce];
+      await saveStore();
+      if (m.detectedAt) { try { await notifyLocal(m,m.lastResult+'\n\u4ee5\u552e\u7968\u9801\u5be6\u969b\u7d50\u679c\u70ba\u6e96\uff0c\u4e0d\u4ee3\u8868\u5df2\u4fdd\u7559\u7968\u5238\u3002'); } catch(e) {m.lastError=`\u901a\u77e5\u5931\u6557: ${e.message}`;} }
+    } else if (action==='release' || action==='suspend') {
+      if (m.localClientId===clientId && (!b.runId || b.runId===m.localRunId)) {
+        m.localLeaseUntil=0;m.localNextAt=null;m.localState=action==='suspend'?'foreground_paused':'stopped';
+        if (action==='release') {m.running=false;if(b.error){m.lastError=String(b.error).slice(0,300);m.pauseReason='local_paused';}}
+      }
+    }
+    await saveStore();res.json(localConfig(m));
+  } catch(e) { res.status(409).json({error:e.message}); }
+  finally { localOps.delete(m.id); }
+});
+
 app.get('/api/monitors', (req, res) => res.json(store.monitors.map(publicMonitor)));
 
 app.post('/api/monitors', async (req, res) => {
@@ -1100,8 +1238,10 @@ app.put('/api/monitors/:id', async (req, res) => {
     const idx = store.monitors.findIndex(x => x.id === req.params.id);
     if (idx < 0) return res.status(404).json({ error: 'not found' });
     const old = store.monitors[idx];
-    if (activeInspections.has(old.id) || activeRuns.has(old.id)) return res.status(409).json({ error: '請先停止監控並等待檢查結束，再儲存編輯。' });
+    if (activeInspections.has(old.id) || activeRuns.has(old.id) || localOps.has(old.id)) return res.status(409).json({ error: '請先停止監控並等待檢查結束，再儲存編輯。' });
     const m = normalizeMonitor(req.body, old);
+    m.localLeaseUntil = 0; m.localState = 'stopped'; m.localRunId = crypto.randomUUID();
+    if (m.url !== old.url || m.execution !== old.execution) { delete m.localKeyHash; m.localSelection = []; }
     old.running = false;
     m.running = false; m.pauseReason = ''; m.lastError = ''; m.detectedAt = '';
     clearTimeout(runtime.get(old.id)?.timer);
@@ -1121,6 +1261,7 @@ app.put('/api/monitors/:id', async (req, res) => {
 app.delete('/api/monitors/:id', async (req, res) => {
   const idx = store.monitors.findIndex(x => x.id === req.params.id);
   if (idx < 0) return res.status(404).json({ error: 'not found' });
+  if (localOps.has(req.params.id)) return res.status(409).json({error:'Local report is being saved; retry shortly.'});
   clearTimeout(runtime.get(req.params.id)?.timer);
   const removed = store.monitors[idx]; removed.running = false;
   runtime.delete(req.params.id);
@@ -1139,6 +1280,7 @@ app.post('/api/monitors/:id/start', async (req, res) => {
   if (activeRuns.has(m.id) || activeInspections.has(m.id)) return res.status(409).json({ error: '前一次檢查還在結束中，請稍後再試。' });
   if (m.retryAfterAt > Date.now()) return res.status(429).json({ error: '網站要求等待，請稍後再開始。' });
   m.running = true; m.lastError = ''; m.pauseReason = ''; m.detectedAt = ''; m.detected = false;
+  if (m.execution === 'browser') { m.localState = 'waiting'; m.localLeaseUntil = 0; m.localRunId = crypto.randomUUID(); }
   runtime.set(m.id, { ...runtime.get(m.id), state: 'running', lastError: '' });
   await saveStore(); scheduleNext(m, 0.05);
   res.json(publicMonitor(m));
@@ -1148,6 +1290,7 @@ app.post('/api/monitors/:id/stop', async (req, res) => {
   const m = store.monitors.find(x => x.id === req.params.id);
   if (!m) return res.status(404).json({ error: 'not found' });
   m.running = false; m.pauseReason = '';
+  if (m.execution === 'browser') { m.localState = 'stopped'; m.localLeaseUntil = 0; m.localRunId = crypto.randomUUID(); }
   clearTimeout(runtime.get(m.id)?.timer);
   runtime.set(m.id, { ...runtime.get(m.id), state: 'stopped', nextAt: null });
   if (!activeInspections.has(m.id)) await closeKktixSession(m.id);
@@ -1157,6 +1300,7 @@ app.post('/api/monitors/:id/stop', async (req, res) => {
 app.post('/api/monitors/:id/test', async (req, res) => {
   const m = store.monitors.find(x => x.id === req.params.id);
   if (!m) return res.status(404).json({ error: 'not found' });
+  if (m.execution === 'browser') return res.status(409).json({ error: '請在已登入的電腦／SE2 票種頁按「讀取票種」，本筆不從 Railway 抓取。' });
   if (m.running || activeInspections.has(m.id) || activeRuns.has(m.id)) return res.status(409).json({ error: '請先停止這筆監控，等目前檢查結束後再測試抓取。' });
   runtime.set(m.id, { ...runtime.get(m.id), state: 'checking', nextAt: null, lastError: '' });
   try {
@@ -1210,7 +1354,7 @@ app.use((error, req, res, next) => {
 app.listen(PORT, () => console.log(`Ticket Cloud Monitor listening on :${PORT}`));
 
 for (const m of store.monitors) {
-  if (m.running) setTimeout(() => dispatchMonitor(m.id), 500 + Math.random() * 1500);
+  if (m.running && m.execution !== 'browser') setTimeout(() => dispatchMonitor(m.id), 500 + Math.random() * 1500);
 }
 
 const idleCleanup = setInterval(() => {
