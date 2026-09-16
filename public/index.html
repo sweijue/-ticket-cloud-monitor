@@ -22,7 +22,7 @@
   <h1>🎫 售票雲端監控</h1>
   <p class="hint">貼網址即可。寬宏、KKTIX、AVEX、拓元、ibon、Ticket Plus 會依網站規則判斷；其他網站預設自動抓「售完/缺貨、庫存/剩餘、可購買狀態」。只監控與通知，不會自動購票。</p>
 
-  <p id="buildVersion" class="hint">V3.3 Ticket Plus + 拓元 場次/票種版</p>
+  <p id="buildVersion" class="hint">V3.4 Ticket Plus 單場頁診斷版</p>
   <section class="card">
     <h2>新增監控</h2>
     <label>名稱</label>
@@ -33,6 +33,7 @@
     <p class="inline-note">系統會依網址自動選擇快速抓取或雲端瀏覽器模式。</p>
     <div id="ticketplusSetup" hidden style="margin-top:16px;padding-top:14px;border-top:1px solid #ddd">
       <h3>Ticket Plus 場次與票種</h3>
+      <button type="button" id="tpDiagnoseOrder" class="secondary" hidden>診斷／讀取單場頁</button>
       <button type="button" id="tpLoadStages" class="secondary">讀取場次</button>
       <div id="tpStageArea" class="hint" style="margin-top:10px">貼上 Ticket Plus 活動網址後按「讀取場次」。</div>
       <button type="button" id="tpLoadTickets" class="secondary" hidden style="margin-top:10px">讀取這個場次的票種</button>
@@ -94,9 +95,9 @@
   <div id="monitors"></div>
 </main>
 <dialog id="diagnosticDialog">
-  <div class="diag-head"><h2>KKTIX 抓取診斷</h2><button id="closeDiagnostic" class="secondary">關閉</button></div>
+  <div class="diag-head"><h2 id="diagnosticTitle">抓取診斷</h2><button id="closeDiagnostic" class="secondary">關閉</button></div>
   <div id="diagnosticContent"></div>
 </dialog>
-<script src="/app.js?v=3.3.0-ticketplus-tixcraft"></script>
+<script src="/app.js?v=3.4.0-ticketplus-order-diagnostic"></script>
 </body>
 </html>

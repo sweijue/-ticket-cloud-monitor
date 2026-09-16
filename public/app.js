@@ -62,7 +62,8 @@ function detectionName(m){
 }
 
 function isTicketplusUrl(v){try{return new URL(v).hostname.toLowerCase().includes('ticketplus.com.tw')}catch{return false}}
-function updateTicketplusPanel(){const box=$('#ticketplusSetup');if(!box)return;box.hidden=!isTicketplusUrl($('#url').value.trim())}
+function isTicketplusOrderUrl(v){try{return isTicketplusUrl(v)&&new URL(v).pathname.startsWith('/order/')}catch{return false}}
+function updateTicketplusPanel(){const box=$('#ticketplusSetup');if(!box)return;const url=$('#url').value.trim(),isTp=isTicketplusUrl(url),isOrder=isTicketplusOrderUrl(url);box.hidden=!isTp;const stageBtn=$('#tpLoadStages'),diagBtn=$('#tpDiagnoseOrder'),area=$('#tpStageArea');if(stageBtn)stageBtn.hidden=isOrder;if(diagBtn)diagBtn.hidden=!isOrder;if(isOrder&&area)area.textContent='這是 Ticket Plus 單場 /order/ 網址，可直接按「診斷／讀取單場頁」。'}
 function isTixcraftUrl(v){try{return new URL(v).hostname.toLowerCase().includes('tixcraft.com')}catch{return false}}
 function updateTixcraftPanel(){const box=$('#tixcraftSetup');if(!box)return;box.hidden=!isTixcraftUrl($('#url').value.trim())}
 $('#url')?.addEventListener('input',()=>{
@@ -70,6 +71,27 @@ $('#url')?.addEventListener('input',()=>{
   if(!isTicketplusUrl(url)){tpStages=[];tpTickets=[];tpSelectedStage=null;renderTpStages();}
   if(!isTixcraftUrl(url)){txStages=[];txTickets=[];txSelectedStage=null;renderTxStages();}
 });
+
+function showTicketplusOrderDiagnostic(d){
+  const dialog=$('#diagnosticDialog'), content=$('#diagnosticContent'), title=$('#diagnosticTitle');
+  if(!dialog)return alert('請一併更新 public/index.html');
+  if(title)title.textContent='Ticket Plus 單場頁診斷';
+  const cls=({restricted:'驗證／限制頁',login_required:'需要登入',ticket_page:'票種頁',unknown:'無法辨識'})[d.classification]||d.classification;
+  const rows=(d.tickets||[]).map(t=>`${t.accessible?'♿ ':''}${t.name}〔${t.state||'unknown'}〕`).join('\n');
+  content.innerHTML=`<p><strong>${escapeHtml(d.message||'')}</strong></p>
+    <div class="statusgrid"><span>HTTP</span><strong>${escapeHtml(d.status)}</strong><span>判斷</span><strong>${escapeHtml(cls)}</strong><span>頁面標題</span><strong>${escapeHtml(d.title||'—')}</strong><span>最後網址</span><strong>${escapeHtml(d.finalUrl||'—')}</strong></div>
+    <h3>抓到的票種</h3><pre>${escapeHtml(rows||'目前沒有辨識到票種')}</pre>
+    ${d.screenshotDataUrl?`<h3>Railway 實際看到的畫面</h3><img class="diagnostic-image" src="${d.screenshotDataUrl}" alt="Ticket Plus diagnostic screenshot">`:''}
+    <details><summary>頁面文字</summary><pre>${escapeHtml(d.textPreview||'—')}</pre></details>`;
+  if(!dialog.open)dialog.showModal();
+}
+$('#tpDiagnoseOrder')?.addEventListener('click',async()=>{
+  const url=$('#url').value.trim();if(!isTicketplusOrderUrl(url))return alert('請貼 Ticket Plus /order/ 單場網址');
+  const b=$('#tpDiagnoseOrder');b.disabled=true;b.textContent='讀取中…';
+  try{const d=await api('/api/ticketplus/diagnose-order',{method:'POST',body:JSON.stringify({url})});tpSelectedStage=null;tpTickets=d.tickets||[];renderTpTickets();showTicketplusOrderDiagnostic(d);}
+  catch(e){alert(e.message)}finally{b.disabled=false;b.textContent='診斷／讀取單場頁'}
+});
+
 function renderTpStages(){
   const area=$('#tpStageArea'), btn=$('#tpLoadTickets'), tickets=$('#tpTicketArea'); if(!area)return;
   if(!tpStages.length){area.innerHTML='貼上 Ticket Plus 活動網址後按「讀取場次」。'; if(btn)btn.hidden=true;if(tickets)tickets.innerHTML='';return}
@@ -242,4 +264,4 @@ monitorsEl.addEventListener('click',async e=>{
 setInterval(()=>{document.querySelectorAll('.next').forEach(el=>{const m=cache.find(x=>x.id===el.dataset.id);if(m)el.textContent=nextText(m)})},1000);
 setInterval(load,5000);
 load();
-api('/api/info').then(info=>{const el=$('#buildVersion');if(el)el.textContent=`V3.3 Ticket Plus + 拓元 場次/票種版 | 後端 ${info.version}`}).catch(()=>{const el=$('#buildVersion');if(el)el.textContent='前端 V3.3；請確認 server.js 也已更新'});
+api('/api/info').then(info=>{const el=$('#buildVersion');if(el)el.textContent=`V3.4 Ticket Plus 單場頁診斷版 | 後端 ${info.version}`}).catch(()=>{const el=$('#buildVersion');if(el)el.textContent='前端 V3.4；請確認 server.js 也已更新'});
