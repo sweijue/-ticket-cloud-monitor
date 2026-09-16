@@ -2,6 +2,8 @@ import express from 'express';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import https from 'node:https';
+import dns from 'node:dns';
 import { chromium } from 'playwright';
 import * as cheerio from 'cheerio';
 
@@ -11,6 +13,7 @@ const DATA_FILE = path.join(DATA_DIR, 'monitors.json');
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || '';
 const MIN_SECONDS = Math.max(1, Math.min(86400, Math.ceil(Number(process.env.MIN_SECONDS) || 1)));
 const TZ = process.env.TZ || 'Asia/Taipei';
+dns.setDefaultResultOrder('ipv4first');
 
 await fs.mkdir(DATA_DIR, { recursive: true });
 
@@ -50,7 +53,7 @@ async function getBrowser() {
 }
 
 // KKTIX diagnostics v3.1: ordinary browser state only, no anti-bot bypass.
-const BUILD_VERSION = '4.0.2-unified';
+const BUILD_VERSION = '4.0.4-notification-fix';
 const DIAGNOSTICS_DIR = path.join(DATA_DIR, 'diagnostics');
 const SESSION_DIR = path.join(DATA_DIR, 'browser-sessions');
 await fs.mkdir(DIAGNOSTICS_DIR, { recursive: true, mode: 0o700 });
@@ -974,24 +977,79 @@ async function inspect(m, options = {}) {
   finally { activeInspections.delete(m.id); }
 }
 
+function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
+function ntfyErrorDetail(error) {
+  const cause = error?.cause || {};
+  return [error?.message, cause?.code, cause?.syscall, cause?.hostname]
+    .filter(Boolean).map(String).filter((v, i, a) => a.indexOf(v) === i).join(' / ');
+}
+function ntfyHttpsPost(payload) {
+  return new Promise((resolve, reject) => {
+    const body = JSON.stringify(payload);
+    const req = https.request({
+      protocol: 'https:', hostname: 'ntfy.sh', port: 443, path: '/', method: 'POST',
+      family: 4, servername: 'ntfy.sh',
+      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) }
+    }, res => {
+      let text = '';
+      res.setEncoding('utf8');
+      res.on('data', chunk => { if (text.length < 4096) text += chunk; });
+      res.on('end', () => {
+        const status = Number(res.statusCode || 0);
+        if (status >= 200 && status < 300) return resolve();
+        const error = new Error(`ntfy HTTP ${status}${text ? `: ${text.slice(0, 240)}` : ''}`);
+        error.status = status;
+        reject(error);
+      });
+    });
+    req.setTimeout(10000, () => {
+      const error = new Error('ntfy timeout'); error.code = 'ETIMEDOUT'; req.destroy(error);
+    });
+    req.on('error', reject);
+    req.end(body);
+  });
+}
+async function sendNtfy(payload) {
+  let lastError;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const r = await fetch('https://ntfy.sh/', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        signal: AbortSignal.timeout(10000), body: JSON.stringify(payload)
+      });
+      if (r.ok) return;
+      const text = await r.text().catch(() => '');
+      const error = new Error(`ntfy HTTP ${r.status}${text ? `: ${text.slice(0, 240)}` : ''}`);
+      error.status = r.status;
+      if (r.status < 500 && r.status !== 429) throw error;
+      lastError = error;
+    } catch (error) {
+      if (error?.status && error.status < 500 && error.status !== 429) throw error;
+      lastError = error;
+    }
+    await sleep(500 + attempt * 1000);
+  }
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try { await ntfyHttpsPost(payload); return; }
+    catch (error) { lastError = error; await sleep(700 + attempt * 1000); }
+  }
+  throw new Error(`ntfy 通知連線失敗：${ntfyErrorDetail(lastError) || 'unknown network error'}`);
+}
 async function notify(m, result) {
   const topic = cleanText(m.ntfyTopic);
   if (!topic) return;
-  const title = `🔔 ${m.name || '網頁監控'} 有變化`;
-  const body = `${result.summary}\n${m.url}`;
-  const r = await fetch(`https://ntfy.sh/${encodeURIComponent(topic)}`, {
-    method: 'POST',
-    headers: {
-      'Title': encodeURIComponent(title),
-      'Priority': 'urgent',
-      'Tags': 'bell,rotating_light',
-      'Click': siteType(m.url) === 'ticketplus' && m.ticketplusStage?.href ? m.ticketplusStage.href :
-        siteType(m.url) === 'tixcraft' && m.tixcraftStage?.href ? m.tixcraftStage.href : m.url,
-      'Content-Type': 'text/plain; charset=utf-8'
-    },
-    body
+  if (!/^[A-Za-z0-9_-]{1,64}$/.test(topic)) throw new Error('ntfy Topic 格式錯誤，只能使用英數、底線、連字號，最長 64 字。');
+  const clickUrl = siteType(m.url) === 'ticketplus' && m.ticketplusStage?.href ? m.ticketplusStage.href :
+    siteType(m.url) === 'tixcraft' && m.tixcraftStage?.href ? m.tixcraftStage.href : m.url;
+  await sendNtfy({
+    topic,
+    title: `🔔 ${m.name || '網頁監控'} 有變化`,
+    message: `${result.summary}\n${m.url}`,
+    click: clickUrl,
+    priority: 5,
+    tags: ['bell', 'rotating_light'],
+    actions: [{ action: 'view', label: '開啟監控頁面', url: clickUrl }]
   });
-  if (!r.ok) throw new Error(`ntfy ${r.status}`);
 }
 
 function publicMonitor(m) {
@@ -1235,14 +1293,11 @@ function localAcquire(m, clientId, name) {
 }
 async function notifyLocal(m, summary) {
   if (!m.ntfyTopic) return;
-  if (!/^[A-Za-z0-9_-]{1,64}$/.test(m.ntfyTopic)) throw Error('Invalid ntfy topic');
+  if (!/^[A-Za-z0-9_-]{1,64}$/.test(m.ntfyTopic)) throw Error('ntfy Topic 格式錯誤，只能使用英數、底線、連字號，最長 64 字。');
   let clickUrl=m.url; try { clickUrl=localUrl(m.url,m.tixcraftStage); } catch {}
-  const r = await fetch('https://ntfy.sh/', { method:'POST',
-    headers:{'Content-Type':'application/json'}, signal:AbortSignal.timeout(10000),
-    body:JSON.stringify({topic:m.ntfyTopic, title:`${m.name} - 網頁監控通知`,
-      message:summary, click:clickUrl, priority:5, tags:['bell'],
-      actions:[{action:'view',label:'開啟監控頁面',url:clickUrl}]}) });
-  if (!r.ok) throw Error(`ntfy HTTP ${r.status}`);
+  await sendNtfy({topic:m.ntfyTopic, title:`${m.name} - 網頁監控通知`,
+    message:summary, click:clickUrl, priority:5, tags:['bell'],
+    actions:[{action:'view',label:'開啟監控頁面',url:clickUrl}]});
 }
 app.post('/api/monitors/:id/pair-local', async (req,res) => {
   if (!ADMIN_PASSWORD) return res.status(400).json({error:'Please set ADMIN_PASSWORD before pairing.'});
