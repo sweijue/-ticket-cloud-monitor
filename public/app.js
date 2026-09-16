@@ -28,26 +28,26 @@ function formData(){
 
 function fillForm(m){
   editingId = m.id;
-  $('#execution').value=m.execution||'cloud';
+  $('#execution').value=m.execution||'auto';
   $('#name').value=m.name||''; $('#url').value=m.url||'';
   document.querySelector(`input[name="intervalMode"][value="${m.intervalMode||'random'}"]`).checked=true;
   $('#fixedSeconds').value=m.fixedSeconds||5; $('#minSeconds').value=m.minSeconds||1; $('#maxSeconds').value=m.maxSeconds||5;
   $('#limitedTime').checked=!!m.limitedTime; $('#startTime').value=m.startTime||'11:55'; $('#endTime').value=m.endTime||'12:30';
-  $('#detectionMode').value=m.detectionMode||'auto'; $('#watchText').value=m.watchText||'已售完'; $('#watchCondition').value=m.watchCondition||'disappears'; $('#ntfyTopic').value=m.ntfyTopic||''; updateCustomRule();
+  $('#detectionMode').value=m.detectionMode||'page'; $('#watchText').value=m.watchText||'已售完'; $('#watchCondition').value=m.watchCondition||'disappears'; $('#ntfyTopic').value=m.ntfyTopic||''; updateCustomRule();
   tpSelectedStage=m.ticketplusStage||null; tpStages=tpSelectedStage?[tpSelectedStage]:[]; tpTickets=(m.ticketplusTicketKeys||[]).map(k=>({key:k,name:k,state:'saved'}));
   txSelectedStage=m.tixcraftStage||null; txStages=txSelectedStage?[txSelectedStage]:[]; txTickets=(m.tixcraftTicketKeys||[]).map(k=>({key:k,name:k,state:'saved'}));
-  if($('#excludeAccessible')) $('#excludeAccessible').checked=m.excludeAccessible!==false; updateTicketplusPanel(); updateTixcraftPanel(); renderTpStages(); renderTpTickets(m.ticketplusTicketKeys||[]); renderTxStages(); renderTxTickets(m.tixcraftTicketKeys||[]);
+  if($('#excludeAccessible')) $('#excludeAccessible').checked=m.excludeAccessible!==false; updateTicketplusPanel(); updateTixcraftPanel(); updateTicketOnlyOptions(); renderTpStages(); renderTpTickets(m.ticketplusTicketKeys||[]); renderTxStages(); renderTxTickets(m.tixcraftTicketKeys||[]);
   $('#save').textContent='更新監控'; $('#cancelEdit').hidden=false;
   window.scrollTo({top:0,behavior:'smooth'});
 }
 
 function resetForm(){
-  $('#execution').value='cloud';$('#localHint').hidden=true;
+  $('#execution').value='auto';$('#localHint').hidden=false;
   editingId=null; $('#name').value=''; $('#url').value='';
   document.querySelector('input[name="intervalMode"][value="random"]').checked=true;
   $('#fixedSeconds').value=5; $('#minSeconds').value=1; $('#maxSeconds').value=5;
-  $('#detectionMode').value='auto'; updateCustomRule(); $('#save').textContent='新增監控'; $('#cancelEdit').hidden=true;
-  tpStages=[];tpTickets=[];tpSelectedStage=null;txStages=[];txTickets=[];txSelectedStage=null;if($('#excludeAccessible'))$('#excludeAccessible').checked=true;updateTicketplusPanel();updateTixcraftPanel();renderTpStages();renderTxStages();
+  $('#detectionMode').value='page'; updateCustomRule(); $('#save').textContent='新增監控'; $('#cancelEdit').hidden=true;
+  tpStages=[];tpTickets=[];tpSelectedStage=null;txStages=[];txTickets=[];txSelectedStage=null;if($('#excludeAccessible'))$('#excludeAccessible').checked=true;updateTicketplusPanel();updateTixcraftPanel();updateTicketOnlyOptions();renderTpStages();renderTxStages();
 }
 
 async function api(url, opts={}){
@@ -59,18 +59,19 @@ async function api(url, opts={}){
 
 function siteName(t){return ({kham:'寬宏',kktix:'KKTIX',avex:'AVEX',tixcraft:'拓元',ibon:'ibon',ticketplus:'Ticket Plus',generic:'通用'})[t]||t}
 function detectionName(m){
-  if(m.execution==='browser')return '本機票種狀態';
-  if(m.siteType!=='generic') return '網站自動判斷';
-  return ({auto:'自動判斷',soldout:'售完/缺貨解除',stock:'庫存/剩餘 > 0',custom:'自訂文字'})[m.detectionMode||'auto']||'自動判斷';
+  const names={page:'智慧整頁變化',auto:'自動庫存／可購買判斷',soldout:'售完／缺貨解除',stock:'庫存／剩餘 > 0',custom:'自訂文字'};
+  return names[m.detectionMode||'page']||'智慧整頁變化';
 }
 
 function isTicketplusUrl(v){try{return new URL(v).hostname.toLowerCase().includes('ticketplus.com.tw')}catch{return false}}
 function isTicketplusOrderUrl(v){try{return isTicketplusUrl(v)&&new URL(v).pathname.startsWith('/order/')}catch{return false}}
-function updateTicketplusPanel(){const box=$('#ticketplusSetup');if(!box)return;const url=$('#url').value.trim(),isTp=isTicketplusUrl(url),isOrder=isTicketplusOrderUrl(url);box.hidden=!isTp;const stageBtn=$('#tpLoadStages'),diagBtn=$('#tpDiagnoseOrder'),area=$('#tpStageArea');if(stageBtn)stageBtn.hidden=isOrder;if(diagBtn)diagBtn.hidden=!isOrder;if(isOrder&&area)area.textContent='這是 Ticket Plus 單場 /order/ 網址，可直接按「診斷／讀取單場頁」。'}
+function updateTicketplusPanel(){const box=$('#ticketplusSetup');if(!box)return;const url=$('#url').value.trim(),isTp=isTicketplusUrl(url),isOrder=isTicketplusOrderUrl(url),enhanced=$('#detectionMode')?.value==='auto',local=$('#execution')?.value==='browser';box.hidden=!isTp||!enhanced||local;const stageBtn=$('#tpLoadStages'),diagBtn=$('#tpDiagnoseOrder'),area=$('#tpStageArea');if(stageBtn)stageBtn.hidden=isOrder;if(diagBtn)diagBtn.hidden=!isOrder;if(isOrder&&area)area.textContent='這是 Ticket Plus 單場 /order/ 網址，可直接按「診斷／讀取單場頁」。'}
 function isTixcraftUrl(v){try{return new URL(v).hostname.toLowerCase().includes('tixcraft.com')}catch{return false}}
-function updateTixcraftPanel(){const box=$('#tixcraftSetup');if(!box)return;box.hidden=!isTixcraftUrl($('#url').value.trim())}
+function isTixcraftAreaUrl(v){try{const u=new URL(v);return /^(?:www\.)?tixcraft\.com$/.test(u.hostname.toLowerCase())&&u.pathname.startsWith('/ticket/area/')}catch{return false}}
+function updateTixcraftPanel(){const box=$('#tixcraftSetup');if(!box)return;const enhanced=$('#detectionMode')?.value==='auto',local=$('#execution')?.value==='browser';box.hidden=!isTixcraftUrl($('#url').value.trim())||!enhanced||local}
+function updateTicketOnlyOptions(){const el=$('#ticketOnlyOptions');if(!el)return;const url=$('#url').value.trim();el.hidden=!($('#detectionMode')?.value==='auto'&&(isTicketplusUrl(url)||isTixcraftUrl(url)));}
 $('#url')?.addEventListener('input',()=>{
-  const url=$('#url').value.trim();updateTicketplusPanel();updateTixcraftPanel();
+  const url=$('#url').value.trim();updateTicketplusPanel();updateTixcraftPanel();updateTicketOnlyOptions();
   if(!isTicketplusUrl(url)){tpStages=[];tpTickets=[];tpSelectedStage=null;renderTpStages();}
   if(!isTixcraftUrl(url)){txStages=[];txTickets=[];txSelectedStage=null;renderTxStages();}
 });
@@ -148,7 +149,7 @@ $('#txLoadTickets')?.addEventListener('click',async()=>{
 });
 
 function updateCustomRule(){ $('#customRule').hidden = $('#detectionMode').value !== 'custom'; }
-$('#detectionMode').addEventListener('change', updateCustomRule);
+$('#detectionMode').addEventListener('change',()=>{updateCustomRule();updateTicketplusPanel();updateTixcraftPanel();updateTicketOnlyOptions();});
 updateCustomRule();
 function stateName(m){
   if(m.state==='local_active')return '🖥 本機回報中';
@@ -168,12 +169,12 @@ function render(ms){
     <div class="top"><div><strong>${escapeHtml(m.name)}</strong><div class="site">${siteName(m.siteType)}</div></div><span class="pill">${stateName(m)}</span></div>
     <div class="statusgrid">
       <span>網址</span><strong>${escapeHtml(m.url)}</strong>
-      <span>執行位置</span><strong>${m.execution==='browser'?'本機瀏覽器（非 Railway 抓取）':'雲端 Railway'}</strong>
-      ${m.execution==='browser'?`<span>裝置</span><strong>${escapeHtml(m.localDeviceName||'未連線')} ${m.localOnline?'（最近 60 秒內有回報）':'（未回報或已停止）'}</strong><span>裝置回報</span><strong>${escapeHtml(localTime(m.localSeenAt))}</strong><span>本機票種</span><strong>${escapeHtml((m.localSelection||[]).map(t=>t.label).join('、')||'等待在售票頁選擇')}</strong>`:''}
+      <span>執行位置</span><strong>${m.execution==='auto'?(m.activeExecution==='browser'?'自動 → 🖥 本機接手':'自動 → ☁️ Railway'):m.execution==='browser'?'🖥 僅本機瀏覽器':'☁️ 僅雲端 Railway'}</strong>
+      ${m.activeExecution==='browser'||m.execution==='browser'?`<span>裝置</span><strong>${escapeHtml(m.localDeviceName||'未連線')} ${m.localOnline?'（最近 60 秒內有回報）':'（未回報或已停止）'}</strong><span>裝置回報</span><strong>${escapeHtml(localTime(m.localSeenAt))}</strong><span>本機監控目標</span><strong>${escapeHtml((m.localSelection||[]).map(t=>t.label).join('、')||'尚未設定；配對後預設智慧整頁')}</strong>`:''}
       <span>頻率</span><strong>${m.intervalMode==='fixed'?`每 ${m.fixedSeconds} 秒`:`隨機 ${m.minSeconds}～${m.maxSeconds} 秒`}</strong>
       <span>判斷</span><strong>${detectionName(m)}</strong>
       ${m.siteType==='ticketplus'&&m.execution!=='browser'?`<span>場次</span><strong>${escapeHtml(m.ticketplusStage?.label||'未選擇')}</strong><span>票種</span><strong>${m.ticketplusTicketKeys?.length?`${m.ticketplusTicketKeys.length} 個指定票種`:'全部一般票種'}${m.excludeAccessible!==false?'（排除身障票）':''}</strong>`:''}
-      ${m.siteType==='tixcraft'?`<span>場次</span><strong>${escapeHtml(m.tixcraftStage?.label||'未選擇')}</strong><span>票種</span><strong>${m.tixcraftTicketKeys?.length?`${m.tixcraftTicketKeys.length} 個指定票種`:'全部一般票種'}${m.excludeAccessible!==false?'（排除身障票）':''}</strong>`:''}
+      ${m.siteType==='tixcraft'&&m.execution!=='browser'?`<span>場次</span><strong>${escapeHtml(m.tixcraftStage?.label||'未選擇')}</strong><span>票種</span><strong>${m.tixcraftTicketKeys?.length?`${m.tixcraftTicketKeys.length} 個指定票種`:'全部一般票種'}${m.excludeAccessible!==false?'（排除身障票）':''}</strong>`:''}
       <span>最後檢查</span><strong>${m.lastCheck||'—'}</strong>
       <span>下次檢查</span><strong class="next" data-id="${m.id}">${nextText(m)}</strong>
       <span>結果</span><strong>${escapeHtml(m.lastResult||'—')}</strong>
@@ -185,7 +186,7 @@ function render(ms){
       <button data-act="test" data-id="${m.id}" class="secondary" ${m.running||m.execution==='browser'?'disabled':''}>測試抓取</button>
       <button data-act="notify" data-id="${m.id}" class="secondary">測試通知</button>
       ${m.siteType==='kktix'?`<button data-act="diagnostic" data-id="${m.id}" class="secondary">檢視抓取畫面</button>`:''}
-      ${m.siteType==='ticketplus'&&isTicketplusOrderUrl(m.url)?`<button data-act="pair" data-id="${m.id}" class="secondary" ${m.running?'disabled':''}>配對電腦 / SE2</button>`:''}
+      ${['auto','browser'].includes(m.execution)?`<button data-act="pair" data-id="${m.id}" class="secondary" ${m.running&&m.state!=='waiting_device'?'disabled':''}>配對本機</button>`:''}
       <button data-act="edit" data-id="${m.id}" class="secondary">編輯</button>
       <button data-act="delete" data-id="${m.id}" class="secondary">刪除</button>
     </div>
@@ -238,7 +239,7 @@ $('#closeDiagnostic')?.addEventListener('click',()=>$('#diagnosticDialog').close
 $('#save').addEventListener('click',async()=>{
   try{
     const data=formData();
-    if(!data.url) return alert('請貼上售票網址');
+    if(!data.url) return alert('請貼上監控網址');
     if(editingId) await api(`/api/monitors/${editingId}`,{method:'PUT',body:JSON.stringify(data)});
     else await api('/api/monitors',{method:'POST',body:JSON.stringify(data)});
     resetForm(); await load();
@@ -273,20 +274,21 @@ monitorsEl.addEventListener('click',async e=>{
 setInterval(()=>{document.querySelectorAll('.next').forEach(el=>{const m=cache.find(x=>x.id===el.dataset.id);if(m)el.textContent=nextText(m)})},1000);
 setInterval(load,5000);
 load();
-api('/api/info').then(info=>{const el=$('#buildVersion');if(el)el.textContent=`V3.5 電腦 / SE2 共用管理版 | 後端 ${info.version}`}).catch(()=>{const el=$('#buildVersion');if(el)el.textContent='前端 V3.5；請確認 server.js 也已更新'});
+api('/api/info').then(info=>{const el=$('#buildVersion');if(el)el.textContent=`V4.0 通用網頁監控 | 後端 ${info.version}`}).catch(()=>{const el=$('#buildVersion');if(el)el.textContent='前端 V4.0；請確認 server.js 也已更新'});
 
 function updateLocalMode(){
-  const local=$('#execution').value==='browser';
-  $('#localHint').hidden=!local;
-  if(local) $('#ticketplusSetup').hidden=true;
-  else updateTicketplusPanel();
+  const mode=$('#execution').value;
+  $('#localHint').hidden=mode==='cloud';
+  if(mode==='browser'){ $('#ticketplusSetup').hidden=true; $('#tixcraftSetup').hidden=true; }
+  else { updateTicketplusPanel(); updateTixcraftPanel(); }
+  updateTicketOnlyOptions();
 }
 $('#execution').addEventListener('change',updateLocalMode);
 $('#url').addEventListener('input',updateLocalMode);
 const originalFill=fillForm;
 fillForm=function(m){originalFill(m);updateLocalMode();};
 const originalReset=resetForm;
-resetForm=function(){originalReset();$('#execution').value='cloud';updateLocalMode();};
+resetForm=function(){originalReset();$('#execution').value='auto';updateLocalMode();};
 async function showPair(m){
   if(m.localPaired && !confirm('\u91cd\u65b0\u7522\u751f\u914d\u5c0d\u78bc\u6703\u4f7f\u6240\u6709\u88dd\u7f6e\u7684\u820a\u914d\u5c0d\u78bc\u5931\u6548\u3002\u78ba\u5b9a\uff1f'))return;
   const j=await api(`/api/monitors/${m.id}/pair-local`,{method:'POST'});

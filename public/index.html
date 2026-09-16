@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
   <meta name="theme-color" content="#f5f5f7" />
-  <title>售票雲端監控</title>
+  <title>網頁雲端監控</title>
   <link rel="stylesheet" href="/style.css" />
   <style>
     #diagnosticDialog{width:min(94vw,880px);max-height:90dvh;box-sizing:border-box;border:1px solid #ccc;border-radius:18px;padding:22px;overflow:auto}
@@ -19,22 +19,22 @@
 </head>
 <body>
 <main class="wrap">
-  <h1>🎫 售票雲端監控</h1>
-  <p class="hint">貼網址即可。寬宏、KKTIX、AVEX、拓元、ibon、Ticket Plus 會依網站規則判斷；其他網站預設自動抓「售完/缺貨、庫存/剩餘、可購買狀態」。只監控與通知，不會自動購票。</p>
+  <h1>🔔 網頁雲端監控</h1>
+  <p class="hint">貼任何一般 HTTP(S) 網頁即可。預設用「智慧整頁變化」監控；已知售票網站仍可使用專用規則。Railway 雲端抓不到時，可自動切到已配對的 Windows / SE2 前景瀏覽器。只讀頁面與通知，不會自動購買或下單。</p>
 
-  <p id="buildVersion" class="hint">V3.5 電腦 / SE2 共用管理版</p>
+  <p id="buildVersion" class="hint">V4.0 通用網頁監控</p>
   <section class="card">
     <h2>新增監控</h2>
     <label>名稱</label>
     <input id="name" placeholder="例如：EUNHYUK 釋票" />
-    <label>售票網址</label>
+    <label>監控網址</label>
     <input id="url" type="url" placeholder="https://..." />
-    <p class="inline-note">KKTIX 需先通過「測試抓取」；出現 403、驗證或無法辨識票種時會暫停。</p>
-    <p class="inline-note">系統會依網址自動選擇快速抓取或雲端瀏覽器模式。</p>
+    <p class="inline-note">自動模式會先嘗試 Railway；若遇到 403 / 429、Cloudflare、登入限制或連續抓取失敗，會等待已配對的本機瀏覽器接手。</p>
+    <p class="inline-note">新網站不需要先寫專用規則；通用模式可直接監控整頁，也可之後在本機指定某個頁面區域。</p>
 
     <label for="execution">執行位置</label>
-    <select id="execution"><option value="cloud">雲端 Railway（原本方式）</option><option value="browser">本機瀏覽器（Windows / SE2，目前僅遠大單場）</option></select>
-    <p id="localHint" class="hint" hidden>先儲存這筆監控，再按「配對電腦 / SE2」。票種改在已登入的本機售票頁選擇；同一筆結果會回報到這裡。不會自動把 403 改走其他裝置。</p>
+    <select id="execution"><option value="auto" selected>自動（建議：雲端 → 失敗時本機接手）</option><option value="cloud">僅雲端 Railway</option><option value="browser">僅本機瀏覽器（Windows / SE2）</option></select>
+    <p id="localHint" class="hint" hidden>先儲存後按「配對本機」，在目標網頁安裝／開啟「通用本機監控腳本」完成一次配對。自動模式平常仍由 Railway 執行；只有雲端讀不到時才要求本機接手。</p>
     <div id="ticketplusSetup" hidden style="margin-top:16px;padding-top:14px;border-top:1px solid #ddd">
       <h3>Ticket Plus 場次與票種</h3>
       <button type="button" id="tpDiagnoseOrder" class="secondary" hidden>診斷／讀取單場頁</button>
@@ -52,7 +52,7 @@
       <div id="txTicketArea" style="margin-top:10px"></div>
       <p class="hint">沿用下方「排除身障／輪椅票」設定。一筆監控先選一個場次；票種可多選，不勾票種則監控全部一般票種。</p>
     </div>
-    <label class="row" style="margin-top:14px"><input id="excludeAccessible" type="checkbox" checked /> 排除身障／身心障礙／輪椅／陪同席</label>
+    <label id="ticketOnlyOptions" class="row" style="margin-top:14px" hidden><input id="excludeAccessible" type="checkbox" checked /> 排除身障／身心障礙／輪椅／陪同席</label>
   </section>
 
   <section class="card">
@@ -72,12 +72,13 @@
     <h2>監控判斷</h2>
     <label>判斷方式</label>
     <select id="detectionMode">
-      <option value="auto" selected>自動判斷（建議）</option>
+      <option value="page" selected>智慧整頁變化（建議）</option>
+      <option value="auto">自動庫存／可購買判斷</option>
       <option value="soldout">售完／缺貨狀態解除</option>
       <option value="stock">庫存／剩餘數量 &gt; 0</option>
       <option value="custom">自訂文字</option>
     </select>
-    <p class="hint">寬宏、AVEX、KKTIX、拓元、ibon、Ticket Plus 仍優先使用各網站專用規則。其他網站選「自動判斷」時，會先找庫存/剩餘數字，再看售完/缺貨狀態與可購買按鈕。</p>
+    <p class="hint">「智慧整頁變化」會先建立基準，再比較主要文字與按鈕狀態，並排除常見時間／token 雜訊；如果某網站太動態，可改用指定文字，或在本機腳本改成指定區域。</p>
     <div id="customRule" hidden>
       <label>監控文字</label><input id="watchText" value="已售完" />
       <label>通知條件</label>
@@ -88,7 +89,7 @@
   <section class="card">
     <h2>通知（iPhone / Windows）</h2>
     <label>ntfy Topic</label><input id="ntfyTopic" placeholder="例如 ticket-一串難猜字串" />
-    <p class="hint">iPhone 安裝 ntfy 並訂閱相同 Topic。偵測到票況變化時，通知可直接點回售票頁。</p>
+    <p class="hint">iPhone 安裝 ntfy 並訂閱相同 Topic。偵測到符合條件或頁面重要變化時，通知可直接點回原網頁。</p>
   </section>
 
   <div class="actions"><button id="save" class="good">新增監控</button><button id="cancelEdit" class="secondary" hidden>取消編輯</button></div>
@@ -97,16 +98,16 @@
   <h2 class="section-title">目前監控</h2>
   <p id="loadStatus" role="status"></p>
   <div id="monitors"></div>
-<section class="card"><h2>本機執行工具</h2><p>Windows 使用 Tampermonkey；SE2 使用 Userscripts。安裝同一支腳本，登入遠大的 /order/ 票種頁後再配對。請停用舊 SE2 1.0 腳本，避免重複執行。</p><a href="/ticketplus-linked.user.js">開啟 / 下載共用腳本</a><p class="hint">本機監控需裝置開機且票種分頁保持前景。你可以在其他裝置查看此管理頁；打開管理頁不等於開啟本機監控。</p></section></main>
+<section class="card"><h2>本機執行工具</h2><p><strong>通用本機監控腳本</strong>可在一般網站使用，支援智慧整頁、指定區域與指定文字；同一支腳本可配對多個不同網站。</p><p><a href="/universal-linked.user.js">安裝／更新：通用本機監控腳本</a></p><details><summary>售票網站專用加強腳本（選配）</summary><p><a href="/ticketplus-linked.user.js">Ticket Plus 專用腳本</a></p><p><a href="/tixcraft-linked.user.js">拓元 Tixcraft 專用腳本</a></p></details><p class="hint">Windows 使用 Tampermonkey；SE2 使用 Userscripts。本機接手時需裝置開機、目標分頁保持前景。腳本只讀取頁面，不會自動購買、登入或繞過驗證。</p></section></main>
 <dialog id="pairDialog" style="width:min(94vw,640px);border:1px solid #ccc;border-radius:16px;padding:24px">
 <h2>配對同一筆監控</h2><p>這串配對碼只能讀取、回報和控制這筆監控，不是售票帳密。請當成密碼保管，不要公開或貼在截圖。</p>
 <textarea id="pairCode" readonly style="width:100%;height:120px;word-break:break-all"></textarea>
 <div class="row"><button id="copyPair">複製配對碼</button><button id="closePair">關閉</button></div>
-<p>在電腦或 SE2 已登入的票種頁，點「監票」→展開「連到管理頁」→貼上配對碼。同一組配對碼可給兩台裝置；重新產生會使舊碼失效。</p></dialog>
+<p>在電腦或 SE2 的目標網頁開啟「網頁監控」面板 → 貼上配對碼。第一次配對會自動以目前整頁建立基準；之後也可改成指定區域／文字。同一組配對碼可給兩台裝置；重新產生會使舊碼失效。</p></dialog>
 <dialog id="diagnosticDialog">
   <div class="diag-head"><h2 id="diagnosticTitle">抓取診斷</h2><button id="closeDiagnostic" class="secondary">關閉</button></div>
   <div id="diagnosticContent"></div>
 </dialog>
-<script src="/app.js?v=3.5.0-local-linked"></script>
+<script src="/app.js?v=4.0.0-universal"></script>
 </body>
 </html>
