@@ -22,7 +22,7 @@
   <h1>🎫 售票雲端監控</h1>
   <p class="hint">貼網址即可。寬宏、KKTIX、AVEX、拓元、ibon、Ticket Plus 會依網站規則判斷；其他網站預設自動抓「售完/缺貨、庫存/剩餘、可購買狀態」。只監控與通知，不會自動購票。</p>
 
-  <p id="buildVersion" class="hint">V3.4 Ticket Plus 單場頁診斷版</p>
+  <p id="buildVersion" class="hint">V3.5 電腦 / SE2 共用管理版</p>
   <section class="card">
     <h2>新增監控</h2>
     <label>名稱</label>
@@ -31,6 +31,10 @@
     <input id="url" type="url" placeholder="https://..." />
     <p class="inline-note">KKTIX 需先通過「測試抓取」；出現 403、驗證或無法辨識票種時會暫停。</p>
     <p class="inline-note">系統會依網址自動選擇快速抓取或雲端瀏覽器模式。</p>
+
+    <label for="execution">執行位置</label>
+    <select id="execution"><option value="cloud">雲端 Railway（原本方式）</option><option value="browser">本機瀏覽器（Windows / SE2，目前僅遠大單場）</option></select>
+    <p id="localHint" class="hint" hidden>先儲存這筆監控，再按「配對電腦 / SE2」。票種改在已登入的本機售票頁選擇；同一筆結果會回報到這裡。不會自動把 403 改走其他裝置。</p>
     <div id="ticketplusSetup" hidden style="margin-top:16px;padding-top:14px;border-top:1px solid #ddd">
       <h3>Ticket Plus 場次與票種</h3>
       <button type="button" id="tpDiagnoseOrder" class="secondary" hidden>診斷／讀取單場頁</button>
@@ -82,7 +86,7 @@
   </section>
 
   <section class="card">
-    <h2>iPhone 推播</h2>
+    <h2>通知（iPhone / Windows）</h2>
     <label>ntfy Topic</label><input id="ntfyTopic" placeholder="例如 ticket-一串難猜字串" />
     <p class="hint">iPhone 安裝 ntfy 並訂閱相同 Topic。偵測到票況變化時，通知可直接點回售票頁。</p>
   </section>
@@ -93,11 +97,16 @@
   <h2 class="section-title">目前監控</h2>
   <p id="loadStatus" role="status"></p>
   <div id="monitors"></div>
-</main>
+<section class="card"><h2>本機執行工具</h2><p>Windows 使用 Tampermonkey；SE2 使用 Userscripts。安裝同一支腳本，登入遠大的 /order/ 票種頁後再配對。請停用舊 SE2 1.0 腳本，避免重複執行。</p><a href="/ticketplus-linked.user.js">開啟 / 下載共用腳本</a><p class="hint">本機監控需裝置開機且票種分頁保持前景。你可以在其他裝置查看此管理頁；打開管理頁不等於開啟本機監控。</p></section></main>
+<dialog id="pairDialog" style="width:min(94vw,640px);border:1px solid #ccc;border-radius:16px;padding:24px">
+<h2>配對同一筆監控</h2><p>這串配對碼只能讀取、回報和控制這筆監控，不是售票帳密。請當成密碼保管，不要公開或貼在截圖。</p>
+<textarea id="pairCode" readonly style="width:100%;height:120px;word-break:break-all"></textarea>
+<div class="row"><button id="copyPair">複製配對碼</button><button id="closePair">關閉</button></div>
+<p>在電腦或 SE2 已登入的票種頁，點「監票」→展開「連到管理頁」→貼上配對碼。同一組配對碼可給兩台裝置；重新產生會使舊碼失效。</p></dialog>
 <dialog id="diagnosticDialog">
   <div class="diag-head"><h2 id="diagnosticTitle">抓取診斷</h2><button id="closeDiagnostic" class="secondary">關閉</button></div>
   <div id="diagnosticContent"></div>
 </dialog>
-<script src="/app.js?v=3.4.0-ticketplus-order-diagnostic"></script>
+<script src="/app.js?v=3.5.0-local-linked"></script>
 </body>
 </html>
