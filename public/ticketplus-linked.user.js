@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ticket Plus Linked Monitor
 // @namespace    local.ticket-monitor.se2
-// @version      1.4.0
+// @version      1.4.1
 // @description  Ticket Plus 單場前景監控：選票種、排除身障票、重整後繼續、ntfy 提醒。不代購、不匯出登入資訊。
 // @match        https://ticketplus.com.tw/*
 // @match        https://www.ticketplus.com.tw/*
@@ -29,7 +29,7 @@
 (() => {
   'use strict';
   if (window.top !== window.self) return;
-  const VERSION = '1.4.0';
+  const VERSION = '1.4.1';
 
   const rawGM = typeof GM === 'undefined' ? {} : GM;
   const adapter = {
@@ -257,43 +257,76 @@
     return segments.join(' > ');
   }
   function manualRowFromTarget(seed) {
-    let el = seed?.nodeType === 1 ? seed : seed?.parentElement;
-    const seedText = norm(seed?.nodeType === 1 ? text(seed) : seed?.textContent || '');
-    for (let n=0; el && n<16 && !el.matches('body,html'); n++, el=el.parentElement) {
+    const target = seed?.nodeType === 1 ? seed : seed?.parentElement;
+    if (!target || target.closest(`#${HOST_ID}`)) return null;
+    const generic = /^(?:已售完|售完|完售|已售罄|售罄|數量|選擇數量|請選擇|加入|取消|下一步|立即購票|available|sold\s*out|\d[\d,]*(?:\s*元)?|(?:NT\s*\$|NTD|TWD|\$)\s*\d[\d,]*)$/i;
+    const seedText = norm(text(target));
+
+    function chooseLabel(el, price) {
+      const preferred = [...el.querySelectorAll('[data-ticket-name],.ticket-name,.ticket-title,[class*="ticketName"],[class*="ticket-name"],h2,h3,h4,h5,strong,b,label,span,p')]
+        .filter(x => visible(x))
+        .map(x => norm(text(x)))
+        .find(s => s.length >= 2 && s.length <= 180 && !generic.test(s) && !INSTRUCTIONS.test(s) && !prices(s).length);
+      let label = preferred || ((seedText.length >= 2 && seedText.length <= 180 && !generic.test(seedText) && !prices(seedText).length) ? seedText : '');
+      if (!label) {
+        const raw = norm(text(el));
+        const chunks = raw.split(/\s{2,}|[｜|]/).map(norm).filter(Boolean);
+        label = chunks.find(s => s.length >= 2 && s.length <= 180 && !generic.test(s) && !INSTRUCTIONS.test(s) && !prices(s).length) || '';
+      }
+      if (!label) label = cleanTicketLabel(text(el), price || 0);
+      return norm(label).slice(0,180);
+    }
+
+    let fallback = null;
+    let el = target;
+    for (let n=0; el && n<14 && !el.matches('body,html'); n++, el=el.parentElement) {
       if (el.closest(`#${HOST_ID}`)) return null;
-      const s=text(el);
-      if (!s || s.length>1800 || INSTRUCTIONS.test(s)) continue;
-      const ps=prices(s);
-      if (!ps.length) continue;
-      const strict=makeRow(el,seed,true);
-      if (strict) return strict;
-      const price=ps[0];
-      let label='';
-      if (seedText && seedText.length>=2 && seedText.length<140 && !prices(seedText).length) label=cleanTicketLabel(seedText,price);
-      if (!label || label.length<2) label=cleanTicketLabel(s,price);
-      if (!label || label.length<2) continue;
+      const s = text(el);
+      if (!s || s.length > 2200 || INSTRUCTIONS.test(s)) continue;
+      const ps = prices(s);
+      const price = ps[0] || 0;
+      const label = chooseLabel(el, price);
+      if (!label || label.length < 2 || generic.test(label)) continue;
+
       const controls=[...el.querySelectorAll(QTY_SELECTOR)].filter(visible);
       const validSelect=controls.find(q=>q.tagName==='SELECT' && enabled(q) && [...q.options].some(o=>!o.disabled && /^\d+$/.test(String(o.value).trim()) && Number(o.value)>0));
       const validInput=controls.find(q=>q.tagName!=='SELECT' && enabled(q) && (!q.hasAttribute('max') || Number(q.getAttribute('max'))>0));
       const plus=plusControl(el), count=countEvidence(s);
       let state='unknown', reason='已手動選取；等待頁面顯示可購買／售完證據';
-      if (SOLD.test(s) || count===0) { state='sold'; reason='票種列顯示售完或剩餘 0'; }
+      if (SOLD.test(s) || count===0) { state='sold'; reason='票種區塊顯示售完或剩餘 0'; }
       else if (FUTURE.test(s)) { state='not_started'; reason='尚未開賣、暫停或販售結束'; }
-      else if (validSelect || validInput || plus || count>0) { state='available'; reason='票種列有可操作數量或明示剩餘票'; }
-      const selector=selectorFor(el);
-      return {key:`sel:${selector}|${price}`,label,price,state,reason,accessible:ACCESSIBLE.test(label),preview:s.slice(0,300),el,selector};
+      else if (validSelect || validInput || plus || count>0) { state='available'; reason='票種區塊有可操作數量或明示剩餘票'; }
+
+      const semantic = el.matches('tr,[role="row"],li,label,button,.v-list-item') || /ticket|price|area|product|order|item/i.test(String(el.className||''));
+      const hasEvidence = !!(price || controls.length || plus || SOLD.test(s) || FUTURE.test(s) || count !== null);
+      const selector = selectorFor(el);
+      const explicit = ['data-ticket-id','data-ticket-type-id','data-price-id','data-area-id'].map(a=>el.getAttribute?.(a)).find(Boolean);
+      const key = explicit ? `id:${explicit}|${price||'na'}` : `manual:${selector}|${price||'na'}|${label.toLowerCase().slice(0,80)}`;
+      const row = {key,label,price,state,reason,accessible:ACCESSIBLE.test(label),preview:s.slice(0,400),el,selector};
+      if (semantic || hasEvidence || n <= 3) return row;
+      fallback ||= row;
     }
-    return null;
+
+    if (seedText.length >= 2 && seedText.length <= 180 && !generic.test(seedText) && !INSTRUCTIONS.test(seedText)) {
+      const selector=selectorFor(target);
+      return {key:`manual:${selector}|na|${seedText.toLowerCase().slice(0,80)}`,label:seedText,price:0,state:'unknown',reason:'已手動選取；此元件沒有同列價格，仍可監控狀態變化',accessible:ACCESSIBLE.test(seedText),preview:seedText,el:target,selector};
+    }
+    return fallback;
   }
   function evidenceForSaved(saved) {
-    if (!saved?.selector) return null;
-    try {
-      const el=document.querySelector(saved.selector);
-      if (!el) return null;
-      const row=makeRow(el,el,true) || manualRowFromTarget(el);
-      if (!row) return null;
-      return {...row,key:saved.key,label:saved.label,price:saved.price,accessible:!!saved.accessible,selector:saved.selector};
-    } catch (_) { return null; }
+    let el = null;
+    if (saved?.selector) {
+      try { el = document.querySelector(saved.selector); } catch (_) { el = null; }
+    }
+    if (!el && saved?.label) {
+      const needle = norm(saved.label).toLowerCase();
+      const candidates = [...document.querySelectorAll('[data-ticket-id],[data-ticket-type-id],[data-price-id],[class*="ticket"],[class*="price"],tr,[role="row"],.v-list-item,label,li,button,span,p')];
+      el = candidates.find(x => visible(x) && norm(text(x)).toLowerCase().includes(needle)) || null;
+    }
+    if (!el) return null;
+    const row=makeRow(el,el,true) || manualRowFromTarget(el);
+    if (!row) return null;
+    return {...row,key:saved.key,label:saved.label || row.label,price:saved.price || row.price || 0,accessible:!!saved.accessible,selector:saved.selector || row.selector};
   }
   async function saveSelectionDraft() {
     settings.selected = rows.filter(r=>selected.has(r.key)).map(serialRow);
@@ -349,7 +382,7 @@
 
       <div class="line"><button type="button" id="scan">自動讀取票種</button><button type="button" id="pick">手動多選票種</button></div>
       <div id="picker" hidden>
-        <div id="pickText">面板會收起。請在售票頁連續點選一個或多個票種；每點一次就會立即加入／取消。完成後按左下角「已選 X 個｜點我完成」。</div>
+        <div id="pickText">面板會收起。請在售票頁連續點選一個或多個票種名稱、價格或該票種區塊；不要求名稱與價格必須在同一列。每點一次立即加入／取消，完成後按左下角「已選 X 個｜點我完成」。</div>
         <div class="line"><button type="button" id="pickAdd">完成選擇</button><button type="button" id="pickCancel">取消</button></div>
       </div>
       <label><input id="exclude" type="checkbox" checked> 排除身障／輪椅／陪同票</label>
@@ -454,7 +487,7 @@
     if (!chosen.length && Array.isArray(settings.selected) && settings.selected.length)
       chosen = settings.selected.filter(r => selected.has(r.key) || !selected.size);
     const textValue = chosen.length
-      ? `已選 ${chosen.length} 個：${chosen.map(r => `${r.label} $${Number(r.price||0).toLocaleString()}`).join('、')}`
+      ? `已選 ${chosen.length} 個：${chosen.map(r => r.price ? `${r.label} $${Number(r.price).toLocaleString()}` : r.label).join('、')}`
       : '已選 0 個票種';
     const box = $('selectionSummary'); if (box) box.textContent = textValue;
     const top = $('selectionSummaryTop'); if (top) top.textContent = textValue;
@@ -484,7 +517,7 @@
         saveSelectionDraft().catch(()=>{});
       });
       const span = document.createElement('span'), b = document.createElement('b'), small = document.createElement('small');
-      b.textContent = `${row.label} · $${row.price.toLocaleString()}`;
+      b.textContent = row.price ? `${row.label} · $${row.price.toLocaleString()}` : row.label;
       small.textContent = `${stateLabel(row.state)}${row.accessible ? ' · 特殊席' : ''}｜${row.reason || ''}`;
       span.append(b, small); label.append(box,span); label.classList.toggle('selected', box.checked); list.appendChild(label);
     }
@@ -492,7 +525,7 @@
   }
   function validateSelection(s) {
     if (!isOrder()) throw Error('請在登入後的 Ticket Plus /order/ 單場票種頁使用。');
-    if (!s.selected.length) throw Error('請先讀取票種，再勾選至少一個一般票種。');
+    if (!s.selected.length) throw Error('請先加入或勾選至少一個一般票種。');
     if (!s.verified) throw Error('請勾選「我已核對票種名稱和狀態」。');
   }
   function validate(s) {
@@ -874,8 +907,8 @@
     if (runtime.running) await halt('已停止，準備手動選票種。');
     unpick(); pickMode=true;
     $('picker').hidden=false;
-    $('pickText').textContent='已進入連續多選：直接在售票頁點票種列。每點一次立即加入／取消；完成後按左下角按鈕。';
-    notice('手動多選中：請直接點售票頁上的票種名稱、價格或整列。');
+    $('pickText').textContent='已進入連續多選：直接點票種名稱、價格或票種區塊。即使價格不在同一列也能加入；完成後按左下角按鈕。';
+    notice('手動多選中：請直接點票種名稱、價格或票種區塊；不再要求同一列同時含價格。');
     panel(false); $('toggle').textContent=`已選 ${selected.size} 個｜點我完成`;
   });
   action('pickAdd',async()=>{ unpick(); panel(true); renderRows(); await saveSelectionDraft(); notice(`手動選擇完成，目前已選 ${selected.size} 個票種。`); });
@@ -886,7 +919,7 @@
       event.preventDefault(); event.stopImmediatePropagation();
       const row=manualRowFromTarget(event.target);
       if (!row) {
-        $('toggle').textContent=`沒抓到這一列｜已選 ${selected.size} 個`;
+        $('toggle').textContent=`這個位置沒有可用文字｜已選 ${selected.size} 個`;
         setTimeout(()=>{ if(pickMode)$('toggle').textContent=`已選 ${selected.size} 個｜點我完成`; },1200);
         return;
       }
