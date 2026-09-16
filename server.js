@@ -24,17 +24,91 @@ for (const verb of ['get', 'post', 'put', 'delete']) {
     typeof arg === 'function' ? (req, res, next) => Promise.resolve().then(() => arg(req, res, next)).catch(next) : arg));
 }
 app.use(express.json({ limit: '512kb' }));
+app.use(express.urlencoded({ extended: false, limit: '8kb' }));
+
+const LOGIN_COOKIE = 'ticket_monitor_login';
+const LOGIN_MAX_AGE = 30 * 24 * 60 * 60;
+
+function cookieMap(req) {
+  const out = {};
+  for (const part of String(req.headers.cookie || '').split(';')) {
+    const i = part.indexOf('=');
+    if (i < 0) continue;
+    const k = part.slice(0, i).trim();
+    const v = part.slice(i + 1).trim();
+    if (k) out[k] = v;
+  }
+  return out;
+}
+function loginSignature(exp) {
+  return crypto.createHmac('sha256', ADMIN_PASSWORD).update(`ticket-monitor|admin|${exp}`).digest('base64url');
+}
+function validLoginCookie(req) {
+  if (!ADMIN_PASSWORD) return true;
+  const raw = cookieMap(req)[LOGIN_COOKIE] || '';
+  const m = /^(\d{10,13})\.([A-Za-z0-9_-]{20,})$/.exec(raw);
+  if (!m) return false;
+  const exp = Number(m[1]);
+  if (!Number.isFinite(exp) || exp <= Date.now()) return false;
+  const expected = Buffer.from(loginSignature(m[1]));
+  const actual = Buffer.from(m[2]);
+  return expected.length === actual.length && crypto.timingSafeEqual(expected, actual);
+}
+function setLoginCookie(req, res) {
+  const exp = String(Date.now() + LOGIN_MAX_AGE * 1000);
+  const value = `${exp}.${loginSignature(exp)}`;
+  const forwarded = String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim();
+  const secure = forwarded === 'https' || req.secure;
+  res.append('Set-Cookie', `${LOGIN_COOKIE}=${value}; Path=/; Max-Age=${LOGIN_MAX_AGE}; HttpOnly; SameSite=Lax${secure ? '; Secure' : ''}`);
+}
+function clearLoginCookie(req, res) {
+  const forwarded = String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim();
+  const secure = forwarded === 'https' || req.secure;
+  res.append('Set-Cookie', `${LOGIN_COOKIE}=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax${secure ? '; Secure' : ''}`);
+}
+function basicAuthValid(req) {
+  const auth = req.headers.authorization || '';
+  const expected = `Basic ${Buffer.from(`admin:${ADMIN_PASSWORD}`).toString('base64')}`;
+  return !!ADMIN_PASSWORD && auth === expected;
+}
+function safeNext(raw) {
+  const v = String(raw || '/');
+  return /^\/(?!\/)/.test(v) ? v : '/';
+}
+function loginPage(nextPath = '/', error = '') {
+  const esc = x => String(x).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+  return `<!doctype html><html lang="zh-Hant"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>監控管理登入</title><style>body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f6f7f8;margin:0;padding:24px;color:#122}main{max-width:420px;margin:12vh auto;background:#fff;border:1px solid #d9dee3;border-radius:18px;padding:26px;box-shadow:0 10px 35px #0001}h1{font-size:24px;margin:0 0 8px}p{color:#566;margin:0 0 20px}.err{color:#a22;margin-bottom:12px}input{box-sizing:border-box;width:100%;font-size:18px;padding:13px 14px;border:1px solid #bbc4cc;border-radius:12px}button{width:100%;margin-top:14px;padding:13px;border:0;border-radius:12px;background:#0b6b43;color:#fff;font-size:18px;font-weight:700}</style></head><body><main><h1>監控管理登入</h1><p>登入後會在這台裝置保持 30 天，不需要每次離開頁面都重新登入。</p>${error ? `<div class="err">${esc(error)}</div>` : ''}<form method="post" action="/login"><input type="hidden" name="next" value="${esc(nextPath)}"><input name="password" type="password" autocomplete="current-password" placeholder="管理密碼" required autofocus><button type="submit">登入並保持登入</button></form></main></body></html>`;
+}
 
 if (ADMIN_PASSWORD) {
+  app.get('/login', (req, res) => {
+    if (validLoginCookie(req) || basicAuthValid(req)) return res.redirect(safeNext(req.query.next));
+    res.status(200).type('html').send(loginPage(safeNext(req.query.next)));
+  });
+  app.post('/login', (req, res) => {
+    const nextPath = safeNext(req.body?.next);
+    const supplied = Buffer.from(String(req.body?.password || ''));
+    const expected = Buffer.from(ADMIN_PASSWORD);
+    const ok = supplied.length === expected.length && crypto.timingSafeEqual(supplied, expected);
+    if (!ok) return res.status(401).type('html').send(loginPage(nextPath, '密碼不正確'));
+    setLoginCookie(req, res);
+    res.redirect(nextPath);
+  });
+  app.get('/logout', (req, res) => {
+    clearLoginCookie(req, res);
+    res.redirect('/login');
+  });
   app.use((req, res, next) => {
     if (req.path === '/healthz' || (req.path === '/api/local' && req.method === 'POST')) return next();
-    const auth = req.headers.authorization || '';
-    const expected = `Basic ${Buffer.from(`admin:${ADMIN_PASSWORD}`).toString('base64')}`;
-    if (auth !== expected) {
-      res.setHeader('WWW-Authenticate', 'Basic realm="Ticket Monitor"');
-      return res.status(401).send('Authentication required');
+    if (validLoginCookie(req)) return next();
+    if (basicAuthValid(req)) {
+      setLoginCookie(req, res);
+      return next();
     }
-    next();
+    if (req.method === 'GET' && String(req.headers.accept || '').includes('text/html')) {
+      return res.redirect(`/login?next=${encodeURIComponent(req.originalUrl || '/')}`);
+    }
+    return res.status(401).json({ error: 'Authentication required' });
   });
 }
 
