@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ticket Plus Linked Monitor
 // @namespace    local.ticket-monitor.se2
-// @version      1.5.0
+// @version      1.5.1
 // @description  Ticket Plus 單場前景監控：選票種、排除身障票、重整後繼續、ntfy 提醒。不代購、不匯出登入資訊。
 // @match        https://ticketplus.com.tw/*
 // @match        https://www.ticketplus.com.tw/*
@@ -28,7 +28,7 @@
  */
 (() => {
   'use strict';
-  const VERSION = '1.5.0';
+  const VERSION = '1.5.1';
 
   // Ticket Plus may render the ticket picker inside an iframe. The previous
   // implementation only listened in the top document (frame execution disabled + early return),
@@ -66,14 +66,27 @@
         if (el.matches('body')) break;
       }
       if (!path.length) return null;
-      let chosen = path.find((el,i)=>{
-        const t=clean(`${el.getAttribute?.('aria-label')||''} ${el.getAttribute?.('title')||''} ${el.innerText||el.textContent||''}`);
-        return t && ((i<=2 && t.length<=280) || (/售完|sold|票|區|price|ticket|area/i.test(t) && t.length<=600));
+      const infoText = el => clean(`${el.getAttribute?.('aria-label')||''} ${el.getAttribute?.('title')||''} ${el.innerText||el.textContent||''}`);
+      const identityText = t => {
+        const core=clean(String(t||'')
+          .replace(/(?:NT\$|TWD|\$)?\s*[1-9]\d{2,5}(?:\s*元)?/gi,' ')
+          .replace(/已售完|已售罄|售罄|完售|售完|售光|無票|0\s*張|sold\s*out/gi,' '));
+        return priceLocal(t)>0 && core.length>=2;
+      };
+      // If the user clicks only the "售完" badge, climb to the nearest row that also
+      // contains the real area/name + price.  The old code captured "售完項目 1",
+      // which cannot be re-identified after a reload.
+      let chosen = path.find(el=>identityText(infoText(el))) || path.find((el,i)=>{
+        const t=infoText(el);
+        return t && ((i<=2 && t.length<=280) || (/票|區|price|ticket|area/i.test(t) && t.length<=600));
       }) || path[0];
       const raw=clean(`${chosen.getAttribute?.('aria-label')||''} ${chosen.getAttribute?.('title')||''} ${chosen.innerText||chosen.textContent||''}`);
       if (!raw) return null;
       const price=priceLocal(raw);
-      let label=raw.replace(/(?:NT\$|TWD|\$)?\s*[1-9]\d{2,5}(?:\s*元)?/gi,' ').replace(/\s+/g,' ').trim();
+      let label=raw
+        .replace(/(?:NT\$|TWD|\$)?\s*[1-9]\d{2,5}(?:\s*元)?/gi,' ')
+        .replace(/已售完|已售罄|售罄|完售|售完|售光|無票|0\s*張|sold\s*out/gi,' ')
+        .replace(/\s+/g,' ').trim();
       if (!label) label = price ? `票價 ${price.toLocaleString()}` : raw.slice(0,100);
       label=label.slice(0,180);
       const sold=/售完|sold\s*out|已售罄|無票|0\s*張/i.test(raw);
@@ -377,13 +390,21 @@
     }
     if (!chain.length) return null;
 
-    // Prefer a compact element near the click. We deliberately allow pure prices,
-    // "售完", numbers, and short labels in manual mode.
-    let chosen = chain.find((el,n) => {
+    // Prefer the smallest ancestor that contains a stable ticket identity
+    // (real name/area + price). This matters when the actual click target is only
+    // a "售完" badge or a price span.
+    const identityText = t => {
+      const p=prices(t)[0]||0;
+      const core=norm(String(t||'')
+        .replace(/(?:NT\s*\$|NTD|TWD|\$)?\s*\d[\d,]*\s*(?:元)?/gi,' ')
+        .replace(/已售完|已售罄|售罄|完售|售完|售光|無票|0\s*張|sold\s*out/gi,' '));
+      return p>0 && core.length>=2;
+    };
+    let chosen = chain.find(el => identityText(norm(`${attrText(el)} ${text(el)}`))) || chain.find((el,n) => {
       const t=norm(`${attrText(el)} ${text(el)}`);
       if (!t) return false;
-      if (n <= 2 && t.length <= 260) return true;
-      const hasTicketEvidence = prices(t).length || SOLD.test(t) || FUTURE.test(t) ||
+      if (n <= 2 && t.length <= 260 && !/^(?:售完|已售完|sold\s*out|無票)$/i.test(t)) return true;
+      const hasTicketEvidence = prices(t).length || FUTURE.test(t) ||
         el.querySelector?.(QTY_SELECTOR) || plusControl(el) || /ticket|price|area|product|item|order/i.test(String(el.className||''));
       return hasTicketEvidence && t.length <= 800;
     }) || chain.find(el => norm(`${attrText(el)} ${text(el)}`).length <= 900) || target;
@@ -394,7 +415,7 @@
     const price = ps[0] || prices(targetText)[0] || 0;
 
     let label='';
-    const useful = [targetText, ...chain.slice(0,5).map(x=>norm(`${attrText(x)} ${text(x)}`))]
+    const useful = [chosenText, targetText, ...chain.slice(0,7).map(x=>norm(`${attrText(x)} ${text(x)}`))]
       .filter(Boolean);
     for (const t of useful) {
       if (t.length > 180) continue;
@@ -402,8 +423,8 @@
         label = `票價 ${prices(t)[0].toLocaleString()}`;
         break;
       }
-      if (SOLD.test(t) && t.length <= 40) { label = `售完項目 ${selected.size+1}`; break; }
-      if (t.length >= 1) { label = cleanTicketLabel(t, price); if (label) break; }
+      if (SOLD.test(t) && t.length <= 40) continue;
+      if (t.length >= 1) { label = cleanTicketLabel(t, price); if (label && !/^(?:售完|已售完|sold\s*out|無票)$/i.test(label)) break; label=''; }
     }
     if (!label) label = price ? `票價 ${price.toLocaleString()}` : `手動票種 ${selected.size+1}`;
 
@@ -714,6 +735,9 @@
   }
   async function halt(message, notify=false) {
     ++cycleToken; clearTimer(); runtime.running=false; runtime.message=message;
+    // Keep the prominent notice in sync with the real runtime state.
+    // Previously it could still say "監控已開始" after the safety stop fired.
+    notice(message);
     if(link){try{await relay('release',{error:notify?message:''});}catch(e){notice('回報停止失敗；管理頁稍後會顯示離線。');}}
     renderStatus(); renderRows();
     await saveRuntime();
@@ -754,7 +778,7 @@
       renderStatus(); await sleep(800);
     }
     const missing=lastRows.filter(r=>r.state==='missing').map(r=>r.label).join('、');
-    throw Error(`30 秒內未能確認票種：${missing || '頁面沒有完整票況'}。已停止，不會當成售完或有票。`);
+    throw Error(`30 秒內無法重新辨識已選票種：${missing || '頁面沒有完整票況'}。為避免監錯票區已停止；請重新選一次該票種。`);
   }
   async function beep() {
     if (!settings.sound) return;
