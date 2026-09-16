@@ -1,18 +1,36 @@
-# V3.5 validation
+# Ticket Monitor V4.0 test report
 
-- JavaScript syntax: passed for server.js, app.js, and the userscript.
-- 33 server-route simulation assertions passed.
-- 43 existing DOM/standalone-script regression assertions passed.
-- 20 paired desktop/mobile integration simulation assertions passed.
-- Total: **96 local simulation assertions**.
-- Validated shared selection, callback/promise GM API adapters, device attribution, reload persistence, manual handoff, stale-device reporting, one-owner lease, notification deduplication, scoped credentials, admin stop and offline status.
-- Visual checks: desktop management card and 375px local panel inspected using offline sample tickets.
-- The production Express/Playwright npm runtime was not installed in this sandbox due to DNS failure. The source route handlers were exercised through a lightweight local HTTP/Express harness instead.
-- No live ticket account was used and no real ntfy notification was sent.
-- No claim of actual SE2/Windows browser-extension compatibility, live ticket parsing, Cloudflare unblock, or push latency verification. These require device testing.
-- Existing cloud monitor implementations retained. No automatic cloud-to-local fallback and no multi-tab background guarantee.
+## Static / syntax checks
+- `node --check server.js` — PASS
+- `node --check public/app.js` — PASS
+- `node --check public/universal-linked.user.js` — PASS
+- `node --check public/ticketplus-linked.user.js` — PASS
+- `node --check public/tixcraft-linked.user.js` — PASS
 
-Primary implementation references consulted:
-- https://github.com/quoid/userscripts (promise-based GM APIs, extension script storage)
-- https://www.tampermonkey.net/documentation.php (callback tab APIs and @connect)
-- https://support.microsoft.com/en-us/topic/learn-about-performance-features-in-microsoft-edge-7b36f363-2119-448a-8de6-375cfd88ab25 (sleeping tabs)
+## Architecture checks
+- Default execution mode is `auto` — PASS
+- Default detection mode is smart whole-page (`page`) — PASS
+- Any valid HTTP(S) URL can use local pairing — PASS
+- Old Ticket-Plus-only local restriction absent — PASS
+- Auto cloud failure -> local fallback state exists — PASS
+- 403 / 429 / 503 / verification page can trigger fallback — PASS
+- Login-page detection with password field can trigger fallback — PASS
+- Three consecutive ordinary cloud errors can trigger fallback — PASS
+- Pairing is allowed while an auto monitor is already waiting for local takeover — PASS
+- Universal userscript matches general HTTP/HTTPS sites — PASS
+- Universal userscript stores multiple site pairings — PASS
+- Universal userscript defaults to smart whole-page baseline — PASS
+- Universal userscript supports region selection, multiple regions, per-target delete, and text conditions — PASS
+- Site-specific Ticket Plus / Tixcraft scripts remain bundled as optional enhancements — PASS
+
+## Smart page behavior
+- First cloud check establishes a baseline and does not notify — PASS by code-path inspection
+- Later stable fingerprint change triggers notification — PASS by code-path inspection
+- Common clock / relative-time / long-token noise is normalized before fingerprinting — PASS
+- Universal local whole-page mode also uses a stable baseline — PASS
+
+## Limits / real-world verification still needed
+- No authenticated real-world browser sessions were available in this build environment.
+- DOM behavior on every possible third-party website cannot be pre-verified.
+- Some SPAs may require local browser mode even when an unauthenticated HTTP fetch returns 200.
+- The implementation deliberately does not bypass CAPTCHA, queues, Cloudflare challenges, or other site protections.
