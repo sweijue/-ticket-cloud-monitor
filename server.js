@@ -1341,8 +1341,7 @@ app.post('/api/local', async (req,res) => {
           ? watched.filter(t=>t.matched)
           : watched.filter(t=>t.state==='available' && !(m.excludeAccessible!==false && (t.accessible || isAccessibleTicketText(t.label))));
         m.lastResult=hits.length
-          ? hits.map(t=>genericMode?`${t.label}：${t.reason||t.current||'條件成立'}`:`${t.label}${t.price?` $${t.price}`:''}: ${t.reason}`).join('
-')
+          ? hits.map(t=>genericMode?`${t.label}：${t.reason||t.current||'條件成立'}`:`${t.label}${t.price?` $${t.price}`:''}: ${t.reason}`).join('\n')
           : genericMode?`已檢查 ${watched.length} 個監控目標，目前條件未成立。`:`已檢查 ${watched.length} 個指定票種，目前無可選購證據。`;
         m.lastError='';m.pauseReason='';
         m.localRows=watched.map(({key,label,price,state,matched,current})=>({key,label,price,state,matched,current}));
