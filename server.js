@@ -50,7 +50,7 @@ async function getBrowser() {
 }
 
 // KKTIX diagnostics v3.1: ordinary browser state only, no anti-bot bypass.
-const BUILD_VERSION = '3.3.0-ticketplus-tixcraft';
+const BUILD_VERSION = '3.4.0-ticketplus-order-diagnostic';
 const DIAGNOSTICS_DIR = path.join(DATA_DIR, 'diagnostics');
 const SESSION_DIR = path.join(DATA_DIR, 'browser-sessions');
 await fs.mkdir(DIAGNOSTICS_DIR, { recursive: true, mode: 0o700 });
@@ -511,6 +511,54 @@ function parseGenericHtml(html, m) {
 
 
 
+
+function isTicketplusOrderUrl(url) {
+  try {
+    const u = new URL(url);
+    return u.hostname.toLowerCase().includes('ticketplus.com.tw') && /^\/order\//i.test(u.pathname);
+  } catch { return false; }
+}
+
+async function diagnoseTicketplusOrder(url) {
+  const b = await getBrowser();
+  const page = await b.newPage({ locale: 'zh-TW', viewport: { width: 1280, height: 900 } });
+  page.setDefaultTimeout(9000);
+  let response = null;
+  try {
+    response = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 25000 });
+    await page.waitForTimeout(2200);
+    const status = response?.status() || 200;
+    const finalUrl = page.url();
+    const title = await page.title().catch(() => '');
+    const rawBody = await page.locator('body').innerText().catch(() => '');
+    const body = cleanText(rawBody);
+    const restricted = blockedText(body, status);
+    const loginRequired = !restricted && (/登入|會員登入|請先登入|sign\s*in|log\s*in/i.test(body) || /\/login(?:\/|\?|$)/i.test(finalUrl));
+    let tickets = [];
+    if (!restricted && !loginRequired) tickets = await collectTicketplusTickets(page).catch(() => []);
+    const ticketLike = tickets.length > 0 || /票種|票價|選擇票券|張數|數量|立即購票|下一步/i.test(body);
+    const classification = restricted ? 'restricted' : loginRequired ? 'login_required' : ticketLike ? 'ticket_page' : 'unknown';
+    const message = restricted
+      ? `Ticket Plus 回應 ${status} 或出現驗證／限制頁。`
+      : loginRequired
+        ? 'Ticket Plus 單場頁要求登入；Railway 目前沒有你的會員登入 Session。'
+        : tickets.length
+          ? `已讀到 ${tickets.length} 個票種／票區。`
+          : ticketLike
+            ? '已進入疑似購票頁，但目前沒有辨識到可解析的票種。'
+            : '頁面可開啟，但目前無法辨識為登入頁或票種頁。';
+    const shot = await page.screenshot({ type:'jpeg', quality:70, fullPage:false }).catch(() => null);
+    return {
+      status, finalUrl, title, classification, message,
+      tickets,
+      textPreview: body.slice(0, 5000),
+      screenshotDataUrl: shot ? `data:image/jpeg;base64,${shot.toString('base64')}` : ''
+    };
+  } finally {
+    await page.close().catch(() => {});
+  }
+}
+
 function isAccessibleTicketText(text) {
   return /身障|身心障礙|輪椅|愛心席|陪同席|accessible|wheelchair/i.test(String(text || ''));
 }
@@ -609,7 +657,22 @@ async function discoverTicketplusTickets(url, stage) {
 }
 
 async function ticketplusSnapshot(m) {
-  if (!m.ticketplusStage) throw new Error('請先按「讀取場次」，選擇 Ticket Plus 場次後再開始監控。');
+  if (isTicketplusOrderUrl(m.url) && !m.ticketplusStage) {
+    const d = await diagnoseTicketplusOrder(m.url);
+    if (d.classification === 'restricted') throw monitorError('restricted', d.message);
+    if (d.classification === 'login_required') throw monitorError('login_required', d.message);
+    if (d.classification !== 'ticket_page') throw monitorError('unrecognized', d.message, false);
+    let tickets = d.tickets || [];
+    const wantedKeys = new Set(Array.isArray(m.ticketplusTicketKeys) ? m.ticketplusTicketKeys : []);
+    let monitored = wantedKeys.size ? tickets.filter(t => wantedKeys.has(t.key)) : tickets;
+    if (m.excludeAccessible !== false) monitored = monitored.filter(t => !t.accessible);
+    const available = monitored.filter(t => t.available);
+    const summary = available.length
+      ? `發現可購買票種：${available.slice(0,6).map(t=>t.name).join('、')}`
+      : monitored.length ? `已檢查 ${monitored.length} 個票種，目前未發現可購買票種` : '單場頁目前沒有可辨識的票種。';
+    return { site:'ticketplus', available:available.length>0, summary, fingerprint: JSON.stringify(monitored.map(t=>[t.key,t.state])).slice(0,12000), finalUrl:d.finalUrl };
+  }
+  if (!m.ticketplusStage) throw new Error('請先按「讀取場次」，選擇 Ticket Plus 場次後再開始監控；若貼的是 /order/ 單場頁，可直接使用「診斷／讀取單場頁」。');
   const { page } = await ticketplusOpen(m.url, m.ticketplusStage);
   try {
     const tickets = await collectTicketplusTickets(page);
@@ -991,6 +1054,16 @@ app.post('/api/tixcraft/tickets', async (req, res) => {
   if (siteType(url) !== 'tixcraft') return res.status(400).json({ error: '請貼 tixcraft.com 的活動網址。' });
   try { res.json(await discoverTixcraftTickets(url, stage)); }
   catch (e) { res.status(400).json({ error: e.message }); }
+});
+
+
+app.post('/api/ticketplus/diagnose-order', async (req, res) => {
+  try {
+    const url = cleanText(req.body?.url);
+    if (!url || siteType(url) !== 'ticketplus') return res.status(400).json({ error: '請貼 Ticket Plus 網址。' });
+    if (!isTicketplusOrderUrl(url)) return res.status(400).json({ error: '這個按鈕是給 Ticket Plus /order/ 單場網址使用。' });
+    res.json(await diagnoseTicketplusOrder(url));
+  } catch (e) { res.status(400).json({ error: e.message }); }
 });
 
 app.post('/api/ticketplus/stages', async (req, res) => {
